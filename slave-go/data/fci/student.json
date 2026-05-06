@@ -1,0 +1,12 @@
+{
+  "meta": {
+    "attributes": [
+      "id",
+      "name",
+      "email",
+      "department_id",
+      "addmission_date"
+    ]
+  },
+  "records": []
+}

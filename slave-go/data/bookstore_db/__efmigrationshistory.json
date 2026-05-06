@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "attributes": [
+      "MigrationId",
+      "ProductVersion"
+    ]
+  },
+  "records": [
+    {
+      "MigrationId": "20250813124258_init",
+      "ProductVersion": "8.0.18"
+    },
+    {
+      "MigrationId": "20250813125346_Clara",
+      "ProductVersion": "8.0.18"
+    },
+    {
+      "MigrationId": "20250814073153_finalOne",
+      "ProductVersion": "8.0.18"
+    },
+    {
+      "MigrationId": "20250814080058_finalOneeeeeeee222",
+      "ProductVersion": "8.0.18"
+    }
+  ]
+}

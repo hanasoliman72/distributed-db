@@ -1,0 +1,11 @@
+{
+  "meta": {
+    "attributes": [
+      "LoginProvider",
+      "ProviderKey",
+      "ProviderDisplayName",
+      "UserId"
+    ]
+  },
+  "records": []
+}

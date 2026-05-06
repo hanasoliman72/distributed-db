@@ -1,0 +1,13 @@
+{
+  "meta": {
+    "attributes": [
+      "Id",
+      "BookId",
+      "UserId",
+      "ReviewText",
+      "Rating",
+      "ReviewDate"
+    ]
+  },
+  "records": []
+}

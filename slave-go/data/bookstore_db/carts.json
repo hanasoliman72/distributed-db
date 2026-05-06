@@ -1,0 +1,14 @@
+{
+  "meta": {
+    "attributes": [
+      "Id",
+      "UserId"
+    ]
+  },
+  "records": [
+    {
+      "Id": "10",
+      "UserId": "4655d7d1-0b47-41e6-a4bd-1579511da69c"
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "meta": {
+    "attributes": [
+      "Id",
+      "OrderId",
+      "BookId",
+      "Quantity",
+      "Price"
+    ]
+  },
+  "records": [
+    {
+      "BookId": "3",
+      "Id": "1",
+      "OrderId": "1",
+      "Price": "15.990000000000000000000000000000",
+      "Quantity": "7"
+    },
+    {
+      "BookId": "2",
+      "Id": "4",
+      "OrderId": "4",
+      "Price": "19.990000000000000000000000000000",
+      "Quantity": "5"
+    },
+    {
+      "BookId": "3",
+      "Id": "5",
+      "OrderId": "5",
+      "Price": "15.990000000000000000000000000000",
+      "Quantity": "1"
+    },
+    {
+      "BookId": "3",
+      "Id": "6",
+      "OrderId": "6",
+      "Price": "15.990000000000000000000000000000",
+      "Quantity": "1"
+    },
+    {
+      "BookId": "5",
+      "Id": "7",
+      "OrderId": "7",
+      "Price": "14.990000000000000000000000000000",
+      "Quantity": "9"
+    }
+  ]
+}

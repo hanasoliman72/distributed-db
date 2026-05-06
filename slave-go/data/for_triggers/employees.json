@@ -1,0 +1,86 @@
+{
+  "meta": {
+    "attributes": [
+      "emp_id",
+      "fname",
+      "lname",
+      "hourly_pay",
+      "salary",
+      "job",
+      "hire_date",
+      "super_id"
+    ]
+  },
+  "records": [
+    {
+      "emp_id": "1",
+      "fname": "Mohamed",
+      "hire_date": "2025-12-20 20:48:08",
+      "hourly_pay": "1",
+      "job": "manager",
+      "lname": "Ahmed",
+      "salary": "2080.00",
+      "super_id": ""
+    },
+    {
+      "emp_id": "2",
+      "fname": "Mahmoud",
+      "hire_date": "2025-12-20 20:48:08",
+      "hourly_pay": "15",
+      "job": "cachier",
+      "lname": "Kamal",
+      "salary": "31200.00",
+      "super_id": "5"
+    },
+    {
+      "emp_id": "3",
+      "fname": "Asmaa",
+      "hire_date": "2025-12-20 20:48:08",
+      "hourly_pay": "12.5",
+      "job": "cook",
+      "lname": "Diaa",
+      "salary": "26000.00",
+      "super_id": "5"
+    },
+    {
+      "emp_id": "4",
+      "fname": "Alaa",
+      "hire_date": "2025-12-20 20:48:08",
+      "hourly_pay": "12.5",
+      "job": "cook",
+      "lname": "Ahmed",
+      "salary": "26000.00",
+      "super_id": "1"
+    },
+    {
+      "emp_id": "8",
+      "fname": "YAYA",
+      "hire_date": "2025-12-20 21:17:47",
+      "hourly_pay": "10",
+      "job": "MANAGER",
+      "lname": "SALAH",
+      "salary": "20800.00",
+      "super_id": ""
+    },
+    {
+      "emp_id": "10",
+      "fname": "HANA",
+      "hire_date": "2025-12-20 21:24:06",
+      "hourly_pay": "15",
+      "job": "MANAGER",
+      "lname": "SALAH",
+      "salary": "31200.00",
+      "super_id": ""
+    },
+    {
+      "emp_id": "11",
+      "fname": "MEMO",
+      "hire_date": "2025-12-20 21:44:12",
+      "hourly_pay": "5",
+      "job": "COOK",
+      "lname": "MO",
+      "salary": "10400.00",
+      "super_id": "2"
+    }
+  ]
+}

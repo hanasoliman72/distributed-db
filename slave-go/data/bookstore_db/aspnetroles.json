@@ -1,0 +1,30 @@
+{
+  "meta": {
+    "attributes": [
+      "Id",
+      "Name",
+      "NormalizedName",
+      "ConcurrencyStamp"
+    ]
+  },
+  "records": [
+    {
+      "ConcurrencyStamp": "",
+      "Id": "2fdb094f-35a1-4856-9182-785c97382f85",
+      "Name": "SuperAdmin",
+      "NormalizedName": "SUPERADMIN"
+    },
+    {
+      "ConcurrencyStamp": "",
+      "Id": "430287ca-3fea-4dda-a929-06b8f4c2537b",
+      "Name": "Admin",
+      "NormalizedName": "ADMIN"
+    },
+    {
+      "ConcurrencyStamp": "",
+      "Id": "d2b5f2b1-45e8-4d9e-9722-b9b5e88a00df",
+      "Name": "User",
+      "NormalizedName": "USER"
+    }
+  ]
+}

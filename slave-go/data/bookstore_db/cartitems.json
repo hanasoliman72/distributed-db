@@ -1,0 +1,11 @@
+{
+  "meta": {
+    "attributes": [
+      "Id",
+      "CartId",
+      "BookId",
+      "Quantity"
+    ]
+  },
+  "records": []
+}

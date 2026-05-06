@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "attributes": [
+      "id",
+      "name",
+      "age"
+    ]
+  },
+  "records": [
+    {
+      "age": 22,
+      "id": 2,
+      "name": "Hana"
+    }
+  ]
+}

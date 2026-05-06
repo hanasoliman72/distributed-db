@@ -1,0 +1,11 @@
+{
+  "meta": {
+    "attributes": [
+      "UserId",
+      "LoginProvider",
+      "Name",
+      "Value"
+    ]
+  },
+  "records": []
+}

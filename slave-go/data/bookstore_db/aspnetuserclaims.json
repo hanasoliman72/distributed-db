@@ -1,0 +1,11 @@
+{
+  "meta": {
+    "attributes": [
+      "Id",
+      "UserId",
+      "ClaimType",
+      "ClaimValue"
+    ]
+  },
+  "records": []
+}

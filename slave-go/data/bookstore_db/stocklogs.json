@@ -1,0 +1,86 @@
+{
+  "meta": {
+    "attributes": [
+      "Id",
+      "BookId",
+      "QuantityChanged",
+      "ChangeDate",
+      "Reason",
+      "OrderId"
+    ]
+  },
+  "records": [
+    {
+      "BookId": "2",
+      "ChangeDate": "2025-08-14 11:03:44.612785",
+      "Id": "1",
+      "OrderId": "",
+      "QuantityChanged": "10",
+      "Reason": "Stock adjustment from management"
+    },
+    {
+      "BookId": "3",
+      "ChangeDate": "2025-08-14 11:03:44.722508",
+      "Id": "2",
+      "OrderId": "",
+      "QuantityChanged": "5",
+      "Reason": "Stock adjustment from management"
+    },
+    {
+      "BookId": "4",
+      "ChangeDate": "2025-08-14 11:03:44.738239",
+      "Id": "3",
+      "OrderId": "",
+      "QuantityChanged": "12",
+      "Reason": "Stock adjustment from management"
+    },
+    {
+      "BookId": "5",
+      "ChangeDate": "2025-08-14 11:03:44.753083",
+      "Id": "4",
+      "OrderId": "",
+      "QuantityChanged": "14",
+      "Reason": "Stock adjustment from management"
+    },
+    {
+      "BookId": "6",
+      "ChangeDate": "2025-08-14 11:03:44.773239",
+      "Id": "5",
+      "OrderId": "",
+      "QuantityChanged": "9",
+      "Reason": "Stock adjustment from management"
+    },
+    {
+      "BookId": "2",
+      "ChangeDate": "2025-08-14 16:37:01.644668",
+      "Id": "6",
+      "OrderId": "",
+      "QuantityChanged": "5",
+      "Reason": "Stock adjustment from management"
+    },
+    {
+      "BookId": "3",
+      "ChangeDate": "2025-08-14 16:37:01.690981",
+      "Id": "7",
+      "OrderId": "",
+      "QuantityChanged": "7",
+      "Reason": "Stock adjustment from management"
+    },
+    {
+      "BookId": "4",
+      "ChangeDate": "2025-08-14 16:37:01.708103",
+      "Id": "8",
+      "OrderId": "",
+      "QuantityChanged": "12",
+      "Reason": "Stock adjustment from management"
+    },
+    {
+      "BookId": "5",
+      "ChangeDate": "2025-08-14 16:37:01.720962",
+      "Id": "9",
+      "OrderId": "",
+      "QuantityChanged": "12",
+      "Reason": "Stock adjustment from management"
+    }
+  ]
+}

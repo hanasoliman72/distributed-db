@@ -1,0 +1,26 @@
+{
+  "meta": {
+    "attributes": [
+      "id",
+      "name"
+    ]
+  },
+  "records": [
+    {
+      "id": "1",
+      "name": "Northeast"
+    },
+    {
+      "id": "2",
+      "name": "Midwest"
+    },
+    {
+      "id": "3",
+      "name": "Southeast"
+    },
+    {
+      "id": "4",
+      "name": "West"
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "meta": {
+    "attributes": [
+      "Id",
+      "Title",
+      "Description",
+      "Author",
+      "ISBN",
+      "Price",
+      "ImageUrl",
+      "StockQuantity",
+      "CategoryId"
+    ]
+  },
+  "records": [
+    {
+      "Author": "F. Scott Fitzgerald",
+      "CategoryId": "",
+      "Description": "A classic novel of the Jazz Age.",
+      "ISBN": "1234567890123",
+      "Id": "2",
+      "ImageUrl": "/images/The-Great-Gatsby.jpg",
+      "Price": "19.000000000000000000000000000000",
+      "StockQuantity": "5",
+      "Title": "The Great"
+    },
+    {
+      "Author": "George Orwell",
+      "CategoryId": "",
+      "Description": "A dystopian novel about totalitarianism.",
+      "ISBN": "2345678901234",
+      "Id": "3",
+      "ImageUrl": "/images/1984.jpg",
+      "Price": "15.990000000000000000000000000000",
+      "StockQuantity": "7",
+      "Title": "1984"
+    },
+    {
+      "Author": "Harper Lee",
+      "CategoryId": "",
+      "Description": "A novel about racial injustice in the Deep South.",
+      "ISBN": "3456789012345",
+      "Id": "4",
+      "ImageUrl": "/images/To-Kill-a-Mockingbird.jpg",
+      "Price": "18.500000000000000000000000000000",
+      "StockQuantity": "12",
+      "Title": "To Kill a Mockingbird"
+    },
+    {
+      "Author": "Jane Austen",
+      "CategoryId": "",
+      "Description": "A romantic novel about manners and marriage.",
+      "ISBN": "4567890123456",
+      "Id": "5",
+      "ImageUrl": "/images/Pride-and-Prejudice.jpeg",
+      "Price": "14.990000000000000000000000000000",
+      "StockQuantity": "3",
+      "Title": "Pride and Prejudice"
+    },
+    {
+      "Author": "J.D. Salinger",
+      "CategoryId": "",
+      "Description": "A story about teenage rebellion and angst.",
+      "ISBN": "5678901234567",
+      "Id": "6",
+      "ImageUrl": "/images/The-Catcher-in-the-Rye.jpeg",
+      "Price": "16.990000000000000000000000000000",
+      "StockQuantity": "9",
+      "Title": "The Catcher in the Rye"
+    }
+  ]
+}

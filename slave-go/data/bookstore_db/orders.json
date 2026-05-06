@@ -1,0 +1,96 @@
+{
+  "meta": {
+    "attributes": [
+      "Id",
+      "UserId",
+      "TotalAmount",
+      "ShippingZipCode",
+      "Created",
+      "ShippingAddress",
+      "ShippingCity",
+      "ShippingCountry",
+      "ShippingEmail",
+      "ShippingFirstName",
+      "ShippingLastName",
+      "ShippingPhone",
+      "ShippingState"
+    ]
+  },
+  "records": [
+    {
+      "Created": "2025-08-13 17:37:51.228300",
+      "Id": "1",
+      "ShippingAddress": "Assiut",
+      "ShippingCity": "Assiut",
+      "ShippingCountry": "Egypt",
+      "ShippingEmail": "hanamasood74@gmail.com",
+      "ShippingFirstName": "Hana",
+      "ShippingLastName": "Salah",
+      "ShippingPhone": "01060790080",
+      "ShippingState": "Assiut",
+      "ShippingZipCode": "2063045",
+      "TotalAmount": "111.930000000000000000000000000000",
+      "UserId": "3e13f502-7287-4343-8f4e-3a42d0638577"
+    },
+    {
+      "Created": "2025-08-14 11:11:04.877729",
+      "Id": "4",
+      "ShippingAddress": "Assiut",
+      "ShippingCity": "Assiut",
+      "ShippingCountry": "USA",
+      "ShippingEmail": "Yasmien74@gmail.com",
+      "ShippingFirstName": "Yasmien",
+      "ShippingLastName": "Masood",
+      "ShippingPhone": "01060790080",
+      "ShippingState": "Assiut",
+      "ShippingZipCode": "2063045",
+      "TotalAmount": "99.950000000000000000000000000000",
+      "UserId": "fa562808-d4e2-46c5-9f13-63a46cecebdf"
+    },
+    {
+      "Created": "2025-08-14 14:10:03.220392",
+      "Id": "5",
+      "ShippingAddress": "Assiut",
+      "ShippingCity": "Assiut",
+      "ShippingCountry": "USA",
+      "ShippingEmail": "hanamasood74@gmail.com",
+      "ShippingFirstName": "Hana",
+      "ShippingLastName": "Salah",
+      "ShippingPhone": "01060790080",
+      "ShippingState": "Assiut",
+      "ShippingZipCode": "2063045",
+      "TotalAmount": "15.990000000000000000000000000000",
+      "UserId": "3e13f502-7287-4343-8f4e-3a42d0638577"
+    },
+    {
+      "Created": "2025-08-14 16:33:11.118122",
+      "Id": "6",
+      "ShippingAddress": "Assiut",
+      "ShippingCity": "Assiut",
+      "ShippingCountry": "USA",
+      "ShippingEmail": "mona74@gmail.com",
+      "ShippingFirstName": "Mona",
+      "ShippingLastName": "Emad",
+      "ShippingPhone": "01060790080",
+      "ShippingState": "Assiut",
+      "ShippingZipCode": "2063045",
+      "TotalAmount": "15.990000000000000000000000000000",
+      "UserId": "4655d7d1-0b47-41e6-a4bd-1579511da69c"
+    },
+    {
+      "Created": "2025-08-14 22:19:46.937243",
+      "Id": "7",
+      "ShippingAddress": "Assiut",
+      "ShippingCity": "Assiut",
+      "ShippingCountry": "USA",
+      "ShippingEmail": "hanamasood74@gmail.com",
+      "ShippingFirstName": "Hana",
+      "ShippingLastName": "Salah",
+      "ShippingPhone": "01060790080",
+      "ShippingState": "Assiut",
+      "ShippingZipCode": "2063045",
+      "TotalAmount": "134.910000000000000000000000000000",
+      "UserId": "3e13f502-7287-4343-8f4e-3a42d0638577"
+    }
+  ]
+}
