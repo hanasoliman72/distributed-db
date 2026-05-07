@@ -86,9 +86,9 @@ func (s *Slave) isAlive() bool {
 // ── Slave registry ────────────────────────────────────────────────────────
 
 var Registry = []*Slave{
-	newSlave("http://localhost:8081", true), // Go slave
-	newSlave("http://localhost:8082", true), // Python slave
-	newSlave("http://localhost:8083", true), // Node.js slave
+	//newSlave("http://10.18.224.140:8080", true),  // Go slave
+	newSlave("http://192.168.88.214:8080", true), // C# slave
+	//newSlave("http://192.168.88.109:8082", true), //python slave
 }
 
 // ── Broadcast result ──────────────────────────────────────────────────────

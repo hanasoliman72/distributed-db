@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"master/replication"
 	"master/storage"
 	"net/http"
 )
@@ -35,6 +36,8 @@ func CreateDB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	go replication.Broadcast("/replicate/create-db", map[string]any{"db": req.DB})
+
 	respond(w, http.StatusCreated, map[string]string{"message": "database '" + req.DB + "' created"})
 }
 
@@ -54,6 +57,8 @@ func DropDB(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 		return
 	}
+
+	go replication.Broadcast("/replicate/drop-db", map[string]any{"db": req.DB})
 
 	respond(w, http.StatusOK, map[string]string{"message": "database '" + req.DB + "' dropped"})
 }
