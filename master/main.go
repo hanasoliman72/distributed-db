@@ -11,7 +11,7 @@ import (
 )
 
 // ── MySQL connection config ───────────────────────────────────────────────
-// Change these 4 values to match your MySQL setup.
+// Change these to match your MySQL setup.
 const (
 	mysqlUser     = "root"
 	mysqlPassword = "root"
@@ -20,33 +20,48 @@ const (
 )
 
 func main() {
-	// ── Connect to MySQL ─────────────────────────────────────────────────
+	// ── 1. Connect to MySQL ──────────────────────────────────────────────
 	dsn := mysqlUser + ":" + mysqlPassword + "@tcp(" + mysqlHost + ":" + mysqlPort + ")/"
 	if err := storage.Connect(dsn); err != nil {
 		log.Fatal("Cannot connect to MySQL:", err)
 	}
 	log.Println("Connected to MySQL at", mysqlHost+":"+mysqlPort)
 
-	// ── Route registration ───────────────────────────────────────────────
+	// ── 2. Start the write-queue worker goroutine ────────────────────────
+	// All INSERT / UPDATE / DELETE requests are serialised through the
+	// WriteQueue channel.  No mutex needed on the handler side.
+	replication.StartWriteWorker(
+		storage.InsertRecord,
+		storage.UpdateRecords,
+		storage.DeleteRecords,
+	)
+	log.Println("Write-queue worker started")
+
+	// ── 3. Start the health checker ──────────────────────────────────────
+	// Pings slaves every 10 s; pushes a full snapshot when one recovers.
+	replication.StartHealthChecker(10*time.Second, buildSnapshot)
+	log.Println("Health checker started (interval=10s)")
+
+	// ── 4. Register HTTP routes ──────────────────────────────────────────
 	mux := http.NewServeMux()
 
-	// DB routes
+	// DB
 	mux.HandleFunc("/db/create", method("POST", handlers.CreateDB))
 	mux.HandleFunc("/db/drop", method("DELETE", handlers.DropDB))
 	mux.HandleFunc("/db/list", method("GET", handlers.ListDBs))
 
-	// Table routes
+	// Table
 	mux.HandleFunc("/table/create", method("POST", handlers.CreateTable))
 	mux.HandleFunc("/table/drop", method("DELETE", handlers.DropTable))
 	mux.HandleFunc("/table/list", method("GET", handlers.ListTables))
 
-	// Query routes
+	// Query
 	mux.HandleFunc("/query/insert", method("POST", handlers.Insert))
-	mux.HandleFunc("/query/select", method("POST", handlers.Select))
+	mux.HandleFunc("/query/select", method("GET", handlers.Select))
 	mux.HandleFunc("/query/update", method("PUT", handlers.Update))
 	mux.HandleFunc("/query/delete", method("DELETE", handlers.Delete))
 
-	// Health check
+	// Health
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "role": "master"})
@@ -56,15 +71,14 @@ func main() {
 	mux.HandleFunc("/replication/status", replicationStatus)
 	mux.HandleFunc("/replication/add", replicationAdd)
 
-	// ── Start health checker ─────────────────────────────────────────────
-	replication.StartHealthChecker(10*time.Second, buildSnapshot)
-
+	// ── 5. Start HTTP server ─────────────────────────────────────────────
 	log.Println("Master node listening on :8080")
 	if err := http.ListenAndServe(":8080", mux); err != nil {
 		log.Fatal(err)
 	}
 }
 
+// method restricts a handler to one HTTP method.
 func method(m string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != m {
@@ -75,11 +89,13 @@ func method(m string, h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// GET /replication/status
 func replicationStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"slaves": replication.Status()})
 }
 
+// POST /replication/add  body: { "url": "http://localhost:8084" }
 func replicationAdd(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -97,15 +113,14 @@ func replicationAdd(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"message": "slave registered: " + req.URL})
 }
 
-// buildSnapshot collects all DBs → tables → records from MySQL
-// and returns them as a map for slave re-sync.
+// buildSnapshot reads the full state from MySQL and returns it as a map.
+// Sent to slaves that recover after being offline.
 func buildSnapshot() map[string]any {
 	dbList, err := storage.ListDBs()
 	if err != nil {
 		log.Println("[snapshot] ListDBs error:", err)
 		return nil
 	}
-
 	databases := map[string]any{}
 	for _, db := range dbList {
 		tables, err := storage.ListTables(db)

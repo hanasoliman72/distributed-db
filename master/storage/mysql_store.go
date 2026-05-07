@@ -13,12 +13,6 @@ var DB *sql.DB
 
 // ── Connection ─────────────────────────────────────────────────────────────
 
-// Connect opens a connection to MySQL and verifies it is alive.
-// Call this once from main.go before starting the HTTP server.
-//
-// DSN format: "user:password@tcp(host:port)/"
-// We do NOT include a database name here because we manage multiple
-// databases dynamically.
 func Connect(dsn string) error {
 	var err error
 	DB, err = sql.Open("mysql", dsn)
@@ -33,19 +27,16 @@ func Connect(dsn string) error {
 
 // ── DB operations ──────────────────────────────────────────────────────────
 
-// CreateDB creates a new MySQL database (schema).
 func CreateDB(db string) error {
 	_, err := DB.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", db))
 	return err
 }
 
-// DropDB drops a MySQL database and everything inside it.
 func DropDB(db string) error {
 	_, err := DB.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", db))
 	return err
 }
 
-// ListDBs returns all user-created databases (excludes MySQL internals).
 func ListDBs() ([]string, error) {
 	rows, err := DB.Query(`
 		SELECT schema_name FROM information_schema.schemata
@@ -55,7 +46,6 @@ func ListDBs() ([]string, error) {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var dbs []string
 	for rows.Next() {
 		var name string
@@ -69,36 +59,36 @@ func ListDBs() ([]string, error) {
 
 // ── Table operations ───────────────────────────────────────────────────────
 
-// CreateTable creates a new table inside the given database.
-// attributes is a slice like ["id", "name", "age"].
-// All columns are created as TEXT for simplicity; the master stores
-// whatever JSON the client sends.
+// CreateTable always adds `id INT AUTO_INCREMENT PRIMARY KEY` as the first
+// column. The client never sends id on insert – MySQL generates it.
+// attributes = user-defined columns e.g. ["name","age","email"].
+// If the client accidentally includes "id" in attributes it is skipped.
 func CreateTable(db, table string, attributes []string) error {
 	if len(attributes) == 0 {
 		return fmt.Errorf("at least one attribute is required")
 	}
 
-	// Build column definitions: each attribute becomes a TEXT column.
-	cols := make([]string, len(attributes))
-	for i, a := range attributes {
-		cols[i] = fmt.Sprintf("`%s` TEXT", a)
+	colDefs := []string{"`id` INT AUTO_INCREMENT PRIMARY KEY"}
+	for _, a := range attributes {
+		if strings.ToLower(a) == "id" {
+			continue
+		}
+		colDefs = append(colDefs, fmt.Sprintf("`%s` TEXT", a))
 	}
 
 	query := fmt.Sprintf(
 		"CREATE TABLE IF NOT EXISTS `%s`.`%s` (%s)",
-		db, table, strings.Join(cols, ", "),
+		db, table, strings.Join(colDefs, ", "),
 	)
 	_, err := DB.Exec(query)
 	return err
 }
 
-// DropTable drops a table from the given database.
 func DropTable(db, table string) error {
 	_, err := DB.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`.`%s`", db, table))
 	return err
 }
 
-// ListTables returns all table names inside a database.
 func ListTables(db string) ([]string, error) {
 	rows, err := DB.Query(
 		"SELECT table_name FROM information_schema.tables WHERE table_schema = ?", db)
@@ -106,7 +96,6 @@ func ListTables(db string) ([]string, error) {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var tables []string
 	for rows.Next() {
 		var name string
@@ -118,7 +107,6 @@ func ListTables(db string) ([]string, error) {
 	return tables, rows.Err()
 }
 
-// GetTableAttributes returns the column names of a table in order.
 func GetTableAttributes(db, table string) ([]string, error) {
 	rows, err := DB.Query(
 		`SELECT column_name FROM information_schema.columns
@@ -128,7 +116,6 @@ func GetTableAttributes(db, table string) ([]string, error) {
 		return nil, err
 	}
 	defer rows.Close()
-
 	var cols []string
 	for rows.Next() {
 		var col string
@@ -142,35 +129,55 @@ func GetTableAttributes(db, table string) ([]string, error) {
 
 // ── Record operations ──────────────────────────────────────────────────────
 
-// InsertRecord inserts a single record (map of column→value) into the table.
-func InsertRecord(db, table string, record map[string]any) error {
+// InsertRecord inserts a record WITHOUT an id – MySQL auto-generates it.
+// Returns the generated id so the handler can include it in the response.
+// If the client accidentally sends "id" it is silently stripped.
+func InsertRecord(db, table string, record map[string]any) (int64, error) {
 	if len(record) == 0 {
-		return fmt.Errorf("record cannot be empty")
+		return 0, fmt.Errorf("record cannot be empty")
 	}
 
-	// Build:  INSERT INTO `db`.`table` (`col1`,`col2`) VALUES (?,?)
 	cols := make([]string, 0, len(record))
 	placeholders := make([]string, 0, len(record))
 	values := make([]any, 0, len(record))
 
 	for col, val := range record {
+		if strings.ToLower(col) == "id" {
+			continue // always auto-generated
+		}
 		cols = append(cols, fmt.Sprintf("`%s`", col))
 		placeholders = append(placeholders, "?")
 		values = append(values, fmt.Sprintf("%v", val))
 	}
 
+	if len(cols) == 0 {
+		return 0, fmt.Errorf("record has no valid columns after stripping 'id'")
+	}
+
 	query := fmt.Sprintf(
 		"INSERT INTO `%s`.`%s` (%s) VALUES (%s)",
 		db, table,
-		strings.Join(cols, ","),
-		strings.Join(placeholders, ","),
+		strings.Join(cols, ", "),
+		strings.Join(placeholders, ", "),
 	)
-	_, err := DB.Exec(query, values...)
-	return err
+
+	result, err := DB.Exec(query, values...)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
 }
 
-// SelectRecords returns rows matching all key=value pairs in where.
-// Pass nil or empty map to select all rows.
+// SelectRecords returns rows matching ALL key=value pairs in where.
+// Pass nil or empty map to return ALL rows.
+//
+// Supports filtering by any column:
+//
+//	where = {"id":"3"}              → row with id = 3
+//	where = {"name":"Ali"}          → rows where name = Ali
+//	where = {"age":"20"}            → rows where age = 20
+//	where = {"name":"Ali","age":"20"} → both conditions (AND)
+//	where = nil or {}               → all rows
 func SelectRecords(db, table string, where map[string]any) ([]map[string]any, error) {
 	query := fmt.Sprintf("SELECT * FROM `%s`.`%s`", db, table)
 	args := []any{}
@@ -186,18 +193,14 @@ func SelectRecords(db, table string, where map[string]any) ([]map[string]any, er
 		return nil, err
 	}
 	defer rows.Close()
-
 	return scanRows(rows)
 }
 
-// UpdateRecords updates columns in set for all rows matching where.
-// Returns the number of rows affected.
 func UpdateRecords(db, table string, where, set map[string]any) (int, error) {
 	if len(set) == 0 {
 		return 0, fmt.Errorf("'set' cannot be empty")
 	}
 
-	// Build SET clause
 	setClauses := make([]string, 0, len(set))
 	args := []any{}
 	for col, val := range set {
@@ -224,8 +227,6 @@ func UpdateRecords(db, table string, where, set map[string]any) (int, error) {
 	return int(affected), nil
 }
 
-// DeleteRecords removes all rows matching where.
-// Returns the number of rows deleted.
 func DeleteRecords(db, table string, where map[string]any) (int, error) {
 	query := fmt.Sprintf("DELETE FROM `%s`.`%s`", db, table)
 	args := []any{}
@@ -244,15 +245,13 @@ func DeleteRecords(db, table string, where map[string]any) (int, error) {
 	return int(affected), nil
 }
 
-// ── Snapshot helpers (used by replication) ────────────────────────────────
+// ── Snapshot helpers ───────────────────────────────────────────────────────
 
-// TableSnapshot holds all data from one table – sent to slaves on recovery.
 type TableSnapshot struct {
 	Attributes []string         `json:"attributes"`
 	Records    []map[string]any `json:"records"`
 }
 
-// GetFullTable returns the schema + all records for one table.
 func GetFullTable(db, table string) (*TableSnapshot, error) {
 	attrs, err := GetTableAttributes(db, table)
 	if err != nil {
@@ -268,7 +267,6 @@ func GetFullTable(db, table string) (*TableSnapshot, error) {
 	return &TableSnapshot{Attributes: attrs, Records: records}, nil
 }
 
-// ReplaceTable drops + recreates a table with given data – used by snapshot sync on slaves.
 func ReplaceTable(db, table string, records []map[string]any, attributes []string) error {
 	if err := DropTable(db, table); err != nil {
 		return err
@@ -277,7 +275,7 @@ func ReplaceTable(db, table string, records []map[string]any, attributes []strin
 		return err
 	}
 	for _, rec := range records {
-		if err := InsertRecord(db, table, rec); err != nil {
+		if _, err := InsertRecord(db, table, rec); err != nil {
 			return err
 		}
 	}
@@ -286,8 +284,6 @@ func ReplaceTable(db, table string, records []map[string]any, attributes []strin
 
 // ── Internal helpers ───────────────────────────────────────────────────────
 
-// buildWhere converts a map into a SQL WHERE clause + args slice.
-// Example: {"name":"Ali","age":"20"} → "`name` = ? AND `age` = ?", ["Ali","20"]
 func buildWhere(where map[string]any) (string, []any) {
 	clauses := make([]string, 0, len(where))
 	args := make([]any, 0, len(where))
@@ -298,7 +294,11 @@ func buildWhere(where map[string]any) (string, []any) {
 	return strings.Join(clauses, " AND "), args
 }
 
-// scanRows converts sql.Rows into a slice of maps (column→value).
+// scanRows converts sql.Rows into []map[string]any.
+//
+// FIX: previously used [][]byte which caused id (INT column) to scan as nil.
+// Now uses *interface{} per column so MySQL driver picks the correct Go type
+// (int64 for INT, string for TEXT, nil for NULL) automatically.
 func scanRows(rows *sql.Rows) ([]map[string]any, error) {
 	cols, err := rows.Columns()
 	if err != nil {
@@ -307,10 +307,10 @@ func scanRows(rows *sql.Rows) ([]map[string]any, error) {
 
 	var result []map[string]any
 	for rows.Next() {
-		// Create a slice of interface{} to hold each column value.
-		values := make([][]byte, len(cols))
-		valuePtrs := make([]any, len(cols))
-		for i := range values {
+		// Use *interface{} so the MySQL driver chooses the right type per column.
+		valuePtrs := make([]interface{}, len(cols))
+		values := make([]interface{}, len(cols))
+		for i := range valuePtrs {
 			valuePtrs[i] = &values[i]
 		}
 
@@ -320,7 +320,15 @@ func scanRows(rows *sql.Rows) ([]map[string]any, error) {
 
 		row := make(map[string]any, len(cols))
 		for i, col := range cols {
-			row[col] = string(values[i])
+			raw := values[i]
+			// MySQL driver returns TEXT columns as []byte – convert to string.
+			// INT columns come as int64 – keep as-is so JSON shows a number.
+			// NULL comes as nil – keep as nil so JSON shows null.
+			if b, ok := raw.([]byte); ok {
+				row[col] = string(b)
+			} else {
+				row[col] = raw
+			}
 		}
 		result = append(result, row)
 	}
