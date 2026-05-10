@@ -12,14 +12,15 @@ const string MysqlHost     = "127.0.0.1";
 const string MysqlPort     = "3306";
 const string SlavePort     = "8080";
 
-const string SelfAddr   = "http://127.0.0.1:8080";
-const string MasterAddr = "http://192.168.16.30:8080";
+const string SelfAddr   = "http://127.0.0.1:8081";
+const string MasterAddr = "http://127.0.0.1:8080";
 
 // All peers except self — master will be skipped when it is down
 var peers = new List<string>
 {
     MasterAddr,
-    "http://192.168.16.9:8080",   // slave-go  (add others here)
+    "http://127.0.0.1:8082",// Go slave
+    "http://127.0.0.1:8083",// Python slave
 };
 
 var connStr = $"Server={MysqlHost};Port={MysqlPort};User ID={MysqlUser};Password={MysqlPassword};AllowPublicKeyRetrieval=true;SslMode=None;";

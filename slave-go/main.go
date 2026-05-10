@@ -22,15 +22,16 @@ const (
 	mysqlHost     = "127.0.0.1"
 	mysqlPort     = "3306"
 
-	selfAddr = "http://127.0.0.1:8080" // this node's own address (used to skip self)
+	selfAddr = "http://127.0.0.1:8080"
 )
 
 // Cluster peers: master first, then all other slaves.
 // The broadcaster skips selfAddr automatically.
 var peers = []string{
-	"http://192.168.16.30:8080", // master
-	"http://192.168.16.11:8082", // slave-python
-	// add more slaves here if needed
+	"http://127.0.0.1:8080", // master
+	"http://127.0.0.1:8081", // C# slave
+	"http://127.0.0.1:8082", // Go slave
+	"http://127.0.0.1:8083", // Python slave
 }
 
 // ── Fault-tolerance state ─────────────────────────────────────────────────
@@ -430,7 +431,7 @@ func localSelect(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, map[string]any{
 		"count":     len(records),
 		"records":   records,
-		"served_by": selfRole + " :8081",
+		"served_by": selfRole + " :8082",
 	})
 }
 
@@ -628,6 +629,6 @@ func main() {
 		localDelete(w, r)
 	})
 
-	log.Printf("Go slave (%s) listening on :8081", selfRole)
-	log.Fatal(http.ListenAndServe(":8081", mux))
+	log.Printf("Go slave (%s) listening on :8082", selfRole)
+	log.Fatal(http.ListenAndServe(":8082", mux))
 }

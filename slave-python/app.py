@@ -1,4 +1,4 @@
-# slave-python/app.py  –  Python slave, port 8082
+# slave-python/app.py  –  Python slave, port 8083
 
 from flask import Flask, request, jsonify
 import mysql.connector
@@ -16,19 +16,20 @@ MYSQL_CONFIG = {
     "host":     "127.0.0.1",
     "port":     3306,
     "user":     "root",
-    "password": "rootroot",
+    "password": "root",
 }
 
 def get_conn():
     return mysql.connector.connect(**MYSQL_CONFIG)
 
 # ── Cluster config ────────────────────────────────────────────────────────
-SELF_ADDR   = "http://127.0.0.1:8082"
-MASTER_ADDR = "http://192.168.16.30:8080"
+SELF_ADDR   = "http://127.0.0.1:8083"
+MASTER_ADDR = "http://127.0.0.1:8080"
 
 PEERS = [
     MASTER_ADDR,
-    "http://192.168.16.9:8080",   # slave-go
+    "http://127.0.0.1:8081",# C# slave
+    "http://127.0.0.1:8082",# Go slave
 ]
 
 # ── Role state ────────────────────────────────────────────────────────────
@@ -391,7 +392,7 @@ def local_select():
         cur.execute(query, args); records = scan_rows(cur)
     finally:
         cur.close(); conn.close()
-    return jsonify({"count": len(records), "records": records, "served_by": self_role() + " :8082"})
+    return jsonify({"count": len(records), "records": records, "served_by": self_role() + " :8083"})
 
 
 @app.route("/query/insert", methods=["POST"])
@@ -423,7 +424,7 @@ def local_insert():
     broadcast_record["id"] = generated_id
     broadcast("/replicate/query/insert", {"db": db, "table": table, "record": broadcast_record})
 
-    return jsonify({"message": "record inserted", "generated_id": generated_id, "served_by": self_role() + " :8082"}), 201
+    return jsonify({"message": "record inserted", "generated_id": generated_id, "served_by": self_role() + " :8083"}), 201
 
 
 @app.route("/query/update", methods=["PUT"])
@@ -450,7 +451,7 @@ def local_update():
         cur.close(); conn.close()
 
     broadcast("/replicate/query/update", {"db": db, "table": table, "where": where, "set": set_})
-    return jsonify({"message": "update complete", "records_updated": affected, "served_by": self_role() + " :8082"})
+    return jsonify({"message": "update complete", "records_updated": affected, "served_by": self_role() + " :8083"})
 
 
 @app.route("/query/delete", methods=["DELETE"])
@@ -474,7 +475,7 @@ def local_delete():
         cur.close(); conn.close()
 
     broadcast("/replicate/query/delete", {"db": db, "table": table, "where": where})
-    return jsonify({"message": "delete complete", "records_deleted": affected, "served_by": self_role() + " :8082"})
+    return jsonify({"message": "delete complete", "records_deleted": affected, "served_by": self_role() + " :8083"})
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  UNIQUE PYTHON FEATURE: full-text search across ALL columns
@@ -499,9 +500,9 @@ def full_text_search():
     matched = [row for row in all_rows
                if any(term_lower in str(v).lower() for v in row.values() if v is not None)]
     return jsonify({"search_term": term, "count": len(matched), "records": matched,
-                    "served_by": self_role() + " :8082 (full-text search)"})
+                    "served_by": self_role() + " :3 (full-text search)"})
 
 # ── Entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    log.info("Python slave listening on :8082")
-    app.run(host="0.0.0.0", port=8082, debug=False)
+    log.info("Python slave listening on :8083")
+    app.run(host="0.0.0.0", port=8083, debug=False)
