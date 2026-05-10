@@ -48,17 +48,3 @@ func DropTable(w http.ResponseWriter, r *http.Request) {
 		"message": "table '" + req.Table + "' dropped from database '" + req.DB + "'",
 	})
 }
-
-func ListTables(w http.ResponseWriter, r *http.Request) {
-	db := r.URL.Query().Get("db")
-	if db == "" {
-		respond(w, http.StatusBadRequest, map[string]string{"error": "query param 'db' is required"})
-		return
-	}
-	tables, err := storage.ListTables(db)
-	if err != nil {
-		respond(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-		return
-	}
-	respond(w, http.StatusOK, map[string]any{"tables": tables})
-}

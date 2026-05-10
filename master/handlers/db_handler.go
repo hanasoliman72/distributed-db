@@ -36,7 +36,10 @@ func CreateDB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go replication.Broadcast("/replicate/create-db", map[string]any{"db": req.DB})
+	// ✅ Replicate: tell all slaves to create the same database
+	go replication.Broadcast("/replicate/db/create", map[string]any{
+		"db": req.DB,
+	})
 
 	respond(w, http.StatusCreated, map[string]string{"message": "database '" + req.DB + "' created"})
 }
@@ -58,18 +61,10 @@ func DropDB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go replication.Broadcast("/replicate/drop-db", map[string]any{"db": req.DB})
+	// ✅ Replicate: tell all slaves to drop the same database
+	go replication.Broadcast("/replicate/db/drop", map[string]any{
+		"db": req.DB,
+	})
 
 	respond(w, http.StatusOK, map[string]string{"message": "database '" + req.DB + "' dropped"})
-}
-
-// ── /db/list  GET ─────────────────────────────────────────────────────────
-
-func ListDBs(w http.ResponseWriter, r *http.Request) {
-	dbs, err := storage.ListDBs()
-	if err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	respond(w, http.StatusOK, map[string]any{"databases": dbs})
 }
