@@ -14,7 +14,7 @@ import (
 // Change these to match your MySQL setup.
 const (
 	mysqlUser     = "root"
-	mysqlPassword = "rootroot"
+	mysqlPassword = "root"
 	mysqlHost     = "127.0.0.1"
 	mysqlPort     = "3306"
 )
