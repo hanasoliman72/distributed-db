@@ -14,7 +14,7 @@ import (
 // Change these to match your MySQL setup.
 const (
 	mysqlUser     = "root"
-	mysqlPassword = "rootroot"
+	mysqlPassword = "root"
 	mysqlHost     = "127.0.0.1"
 	mysqlPort     = "3306"
 )
@@ -48,12 +48,10 @@ func main() {
 	// DB
 	mux.HandleFunc("/db/create", method("POST", handlers.CreateDB))
 	mux.HandleFunc("/db/drop", method("DELETE", handlers.DropDB))
-	mux.HandleFunc("/db/list", method("GET", handlers.ListDBs))
 
 	// Table
 	mux.HandleFunc("/table/create", method("POST", handlers.CreateTable))
 	mux.HandleFunc("/table/drop", method("DELETE", handlers.DropTable))
-	mux.HandleFunc("/table/list", method("GET", handlers.ListTables))
 
 	// Query
 	mux.HandleFunc("/query/insert", method("POST", handlers.Insert))
@@ -70,6 +68,14 @@ func main() {
 	// Replication management
 	mux.HandleFunc("/replication/status", replicationStatus)
 	mux.HandleFunc("/replication/add", replicationAdd)
+
+	mux.HandleFunc("/replicate/query/insert", method("POST", replication.ReceiveInsert))
+	mux.HandleFunc("/replicate/query/update", method("POST", replication.ReceiveUpdate))
+	mux.HandleFunc("/replicate/query/delete", method("POST", replication.ReceiveDelete))
+	mux.HandleFunc("/replicate/table/drop", method("POST", replication.ReceiveDropTable))
+
+	// Slaves GET this on startup or after recovery to pull a full snapshot.
+	mux.HandleFunc("/snapshot", method("GET", replication.ServeSnapshot(buildSnapshot)))
 
 	// ── 5. Start HTTP server ─────────────────────────────────────────────
 	log.Println("Master node listening on :8080")
