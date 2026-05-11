@@ -21,59 +21,191 @@ const (
 	mysqlPassword = "root"
 	mysqlHost     = "127.0.0.1"
 	mysqlPort     = "3306"
-
-	selfAddr = "http://127.0.0.1:8080" // this node's own address (used to skip self)
+	selfAddr      = "http://127.0.0.1:8082"
+	masterAddr    = "http://127.0.0.1:8080"
+	listenPort    = ":8082"
 )
 
-// Cluster peers: master first, then all other slaves.
-// The broadcaster skips selfAddr automatically.
-var peers = []string{
-	"http://192.168.16.30:8080", // master
-	"http://192.168.16.11:8082", // slave-python
-	// add more slaves here if needed
+// Order: master → Python → C# → Go (lowest priority)
+var priorityChain = []string{
+	"http://127.0.0.1:8080", // master
+	"http://127.0.0.1:8083", // Python slave
+	"http://127.0.0.1:8081", // C# slave
 }
 
-// ── Fault-tolerance state ─────────────────────────────────────────────────
+// Peers to broadcast to (everyone except self)
+var peers = []string{
+	"http://127.0.0.1:8080",
+	"http://127.0.0.1:8081",
+	"http://127.0.0.1:8083",
+}
+
+// Internal secret — must match master and all slaves
+const internalSecret = "ddb-internal-secret-2025"
+
+// ── Role state ────────────────────────────────────────────────────────────
 
 var (
-	masterAddr   = peers[0]
-	masterDown   bool
-	masterDownMu sync.RWMutex
-	isSelfMaster bool // true when this slave promoted itself
-	selfRole     = "slave-go"
+	stateMu        sync.RWMutex
+	isActingMaster bool
+	masterIsDown   bool
 )
 
-func setMasterDown(down bool) {
-	masterDownMu.Lock()
-	defer masterDownMu.Unlock()
-	if down && !masterDown {
-		log.Printf("[fault] master %s is unreachable — promoting self to acting master", masterAddr)
-		isSelfMaster = true
-		selfRole = "slave-go (acting master)"
-	} else if !down && masterDown {
-		log.Printf("[fault] master %s is back online — reverting to slave role", masterAddr)
-		isSelfMaster = false
-		selfRole = "slave-go"
+func setRole(acting bool) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	if acting && !isActingMaster {
+		log.Println("[role] Promoted to ACTING MASTER")
+	} else if !acting && isActingMaster {
+		log.Println("[role] Demoted back to SLAVE — pushing snapshot first")
 	}
-	masterDown = down
+	isActingMaster = acting
 }
 
-func isMasterDown() bool {
-	masterDownMu.RLock()
-	defer masterDownMu.RUnlock()
-	return masterDown
+func canManageDB() bool {
+	stateMu.RLock()
+	defer stateMu.RUnlock()
+	return isActingMaster
 }
 
-// masterWatcher pings the master every 5 s so we can detect recovery.
-func masterWatcher() {
-	for {
-		time.Sleep(5 * time.Second)
-		_, err := http.Get(masterAddr + "/health")
-		if err != nil {
-			setMasterDown(true)
-		} else {
-			setMasterDown(false)
+func selfRole() string {
+	stateMu.RLock()
+	defer stateMu.RUnlock()
+	if isActingMaster {
+		return "slave-go (acting master)"
+	}
+	return "slave-go"
+}
+
+// ── Master watcher ────────────────────────────────────────────────────────
+
+func pingNode(url string) bool {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(url + "/health")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func startMasterWatcher() {
+	go func() {
+		for {
+			time.Sleep(5 * time.Second)
+
+			allHigherDown := true
+			for _, node := range priorityChain {
+				if pingNode(node) {
+					allHigherDown = false
+					break
+				}
+			}
+
+			stateMu.RLock()
+			wasActing := isActingMaster
+			stateMu.RUnlock()
+
+			if allHigherDown {
+				masterIsDown = true
+				setRole(true)
+			} else {
+				masterIsDown = false
+				if wasActing {
+					go pushSnapshot()
+				}
+				setRole(false)
+			}
 		}
+	}()
+}
+
+func pushSnapshot() {
+	snap := buildSnapshot()
+	if snap == nil {
+		return
+	}
+	body, _ := json.Marshal(snap)
+	req, _ := http.NewRequest("POST", masterAddr+"/replicate/snapshot", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Replication-Secret", internalSecret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("[snapshot] push failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	log.Printf("[snapshot] pushed to master → HTTP %d", resp.StatusCode)
+}
+
+func buildSnapshot() map[string]any {
+	rows, err := db.Query(`SELECT schema_name FROM information_schema.schemata
+		WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys')`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	databases := map[string]any{}
+	for rows.Next() {
+		var dbName string
+		rows.Scan(&dbName)
+
+		tblRows, err := db.Query("SELECT table_name FROM information_schema.tables WHERE table_schema = ?", dbName)
+		if err != nil {
+			continue
+		}
+		tableMap := map[string]any{}
+		for tblRows.Next() {
+			var tblName string
+			tblRows.Scan(&tblName)
+
+			colRows, _ := db.Query(`SELECT column_name FROM information_schema.columns
+				WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position`, dbName, tblName)
+			var attrs []string
+			for colRows.Next() {
+				var col string
+				colRows.Scan(&col)
+				attrs = append(attrs, col)
+			}
+			colRows.Close()
+
+			dataRows, err := db.Query(fmt.Sprintf("SELECT * FROM `%s`.`%s`", dbName, tblName))
+			var records []map[string]any
+			if err == nil {
+				records, _ = scanRows(dataRows)
+				dataRows.Close()
+			}
+			if records == nil {
+				records = []map[string]any{}
+			}
+			tableMap[tblName] = map[string]any{"attributes": attrs, "records": records}
+		}
+		tblRows.Close()
+		databases[dbName] = tableMap
+	}
+	return map[string]any{"databases": databases}
+}
+
+// ── Broadcaster ───────────────────────────────────────────────────────────
+
+func broadcast(path string, payload any) {
+	body, _ := json.Marshal(payload)
+	for _, peer := range peers {
+		go func(url string) {
+			if url == masterAddr && masterIsDown {
+				return
+			}
+			req, _ := http.NewRequest("POST", url+path, bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Replication-Secret", internalSecret)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				log.Printf("[broadcast] %s%s failed: %v", url, path, err)
+				return
+			}
+			defer resp.Body.Close()
+		}(peer)
 	}
 }
 
@@ -91,42 +223,6 @@ func connectMySQL() error {
 	return db.Ping()
 }
 
-// ── Broadcaster ───────────────────────────────────────────────────────────
-// Sends a POST to every peer except ourselves.
-// If a peer is the master and it's currently marked down, we skip it (not
-// strictly required, but avoids stacking timeouts).
-
-func broadcast(path string, payload any) {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		log.Printf("[broadcast] marshal error: %v", err)
-		return
-	}
-	for _, peer := range peers {
-		if peer == selfAddr {
-			continue // skip ourselves
-		}
-		if peer == masterAddr && isMasterDown() {
-			log.Printf("[broadcast] skipping down master %s", peer)
-			continue
-		}
-		go func(url string) {
-			resp, err := http.Post(url+path, "application/json", bytes.NewReader(body))
-			if err != nil {
-				log.Printf("[broadcast] POST %s%s failed: %v", url, path, err)
-				if url == masterAddr {
-					setMasterDown(true)
-				}
-				return
-			}
-			resp.Body.Close()
-			if url == masterAddr {
-				setMasterDown(false) // successful contact → mark master alive
-			}
-		}(peer)
-	}
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────
 
 func respond(w http.ResponseWriter, status int, body any) {
@@ -140,8 +236,8 @@ func decode(r *http.Request, dst any) error {
 }
 
 func buildWhere(where map[string]any) (string, []any) {
-	clauses := make([]string, 0, len(where))
-	args := make([]any, 0, len(where))
+	clauses := make([]string, 0)
+	args := make([]any, 0)
 	for col, val := range where {
 		clauses = append(clauses, fmt.Sprintf("`%s` = ?", col))
 		args = append(args, fmt.Sprintf("%v", val))
@@ -156,20 +252,18 @@ func scanRows(rows *sql.Rows) ([]map[string]any, error) {
 	}
 	var result []map[string]any
 	for rows.Next() {
-		valuePtrs := make([]interface{}, len(cols))
-		values := make([]interface{}, len(cols))
-		for i := range valuePtrs {
-			valuePtrs[i] = &values[i]
+		ptrs := make([]interface{}, len(cols))
+		vals := make([]interface{}, len(cols))
+		for i := range ptrs {
+			ptrs[i] = &vals[i]
 		}
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return nil, err
-		}
-		row := make(map[string]any, len(cols))
+		rows.Scan(ptrs...)
+		row := map[string]any{}
 		for i, col := range cols {
-			if b, ok := values[i].([]byte); ok {
+			if b, ok := vals[i].([]byte); ok {
 				row[col] = string(b)
 			} else {
-				row[col] = values[i]
+				row[col] = vals[i]
 			}
 		}
 		result = append(result, row)
@@ -177,62 +271,60 @@ func scanRows(rows *sql.Rows) ([]map[string]any, error) {
 	return result, rows.Err()
 }
 
+func isInternal(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("X-Replication-Secret") == internalSecret {
+		return true
+	}
+	respond(w, http.StatusForbidden, map[string]string{
+		"error": "forbidden: internal endpoint",
+	})
+	return false
+}
+
 // ── Health ────────────────────────────────────────────────────────────────
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
-	respond(w, http.StatusOK, map[string]string{
-		"status": "ok",
-		"role":   selfRole,
-	})
+	respond(w, http.StatusOK, map[string]string{"status": "ok", "role": selfRole()})
 }
 
-// ── Replication receivers (called by master OR other slaves) ──────────────
-// These are unchanged from the original — they just apply whatever they
-// receive to local MySQL. The broadcaster in each write handler is what
-// adds the bidirectional fan-out.
+// ════════════════════════════════════════════════════════════════════════════
+//  REPLICATION RECEIVERS  (master/slaves → this node, internal only)
+// ════════════════════════════════════════════════════════════════════════════
 
 func replicateCreateDB(w http.ResponseWriter, r *http.Request) {
+	if !isInternal(w, r) {
+		return
+	}
 	var req struct {
 		DB string `json:"db"`
 	}
-	if err := decode(r, &req); err != nil || req.DB == "" {
-		respond(w, http.StatusBadRequest, map[string]string{"error": "db required"})
-		return
-	}
-	if _, err := db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", req.DB)); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	log.Printf("[slave] DB '%s' created via replication", req.DB)
+	decode(r, &req)
+	db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", req.DB))
 	respond(w, http.StatusOK, map[string]string{"status": "replicated"})
 }
 
 func replicateDropDB(w http.ResponseWriter, r *http.Request) {
+	if !isInternal(w, r) {
+		return
+	}
 	var req struct {
 		DB string `json:"db"`
 	}
-	if err := decode(r, &req); err != nil || req.DB == "" {
-		respond(w, http.StatusBadRequest, map[string]string{"error": "db required"})
-		return
-	}
-	if _, err := db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", req.DB)); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	log.Printf("[slave] DB '%s' dropped via replication", req.DB)
+	decode(r, &req)
+	db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", req.DB))
 	respond(w, http.StatusOK, map[string]string{"status": "replicated"})
 }
 
 func replicateCreateTable(w http.ResponseWriter, r *http.Request) {
+	if !isInternal(w, r) {
+		return
+	}
 	var req struct {
 		DB         string   `json:"db"`
 		Table      string   `json:"table"`
 		Attributes []string `json:"attributes"`
 	}
-	if err := decode(r, &req); err != nil {
-		respond(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
+	decode(r, &req)
 	db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", req.DB))
 	colDefs := []string{"`id` INT AUTO_INCREMENT PRIMARY KEY"}
 	for _, a := range req.Attributes {
@@ -240,72 +332,57 @@ func replicateCreateTable(w http.ResponseWriter, r *http.Request) {
 			colDefs = append(colDefs, fmt.Sprintf("`%s` TEXT", a))
 		}
 	}
-	if _, err := db.Exec(fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS `%s`.`%s` (%s)",
-		req.DB, req.Table, strings.Join(colDefs, ", "),
-	)); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
+	db.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s`.`%s` (%s)",
+		req.DB, req.Table, strings.Join(colDefs, ", ")))
 	respond(w, http.StatusOK, map[string]string{"status": "replicated"})
 }
 
 func replicateDropTable(w http.ResponseWriter, r *http.Request) {
+	if !isInternal(w, r) {
+		return
+	}
 	var req struct {
 		DB    string `json:"db"`
 		Table string `json:"table"`
 	}
-	if err := decode(r, &req); err != nil {
-		respond(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
+	decode(r, &req)
 	db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`.`%s`", req.DB, req.Table))
 	respond(w, http.StatusOK, map[string]string{"status": "replicated"})
 }
 
 func replicateInsert(w http.ResponseWriter, r *http.Request) {
+	if !isInternal(w, r) {
+		return
+	}
 	var req struct {
 		DB     string         `json:"db"`
 		Table  string         `json:"table"`
 		Record map[string]any `json:"record"`
 	}
-	if err := decode(r, &req); err != nil {
-		respond(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	cols := make([]string, 0, len(req.Record))
-	placeholders := make([]string, 0, len(req.Record))
-	values := make([]any, 0, len(req.Record))
+	decode(r, &req)
+	cols, phs, vals := []string{}, []string{}, []any{}
 	for col, val := range req.Record {
 		cols = append(cols, fmt.Sprintf("`%s`", col))
-		placeholders = append(placeholders, "?")
-		values = append(values, fmt.Sprintf("%v", val))
+		phs = append(phs, "?")
+		vals = append(vals, fmt.Sprintf("%v", val))
 	}
-	if _, err := db.Exec(fmt.Sprintf(
-		"INSERT INTO `%s`.`%s` (%s) VALUES (%s)",
-		req.DB, req.Table,
-		strings.Join(cols, ", "),
-		strings.Join(placeholders, ", "),
-	), values...); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
+	db.Exec(fmt.Sprintf("INSERT INTO `%s`.`%s` (%s) VALUES (%s)",
+		req.DB, req.Table, strings.Join(cols, ", "), strings.Join(phs, ", ")), vals...)
 	respond(w, http.StatusOK, map[string]string{"status": "replicated"})
 }
 
 func replicateUpdate(w http.ResponseWriter, r *http.Request) {
+	if !isInternal(w, r) {
+		return
+	}
 	var req struct {
 		DB    string         `json:"db"`
 		Table string         `json:"table"`
 		Where map[string]any `json:"where"`
 		Set   map[string]any `json:"set"`
 	}
-	if err := decode(r, &req); err != nil {
-		respond(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	setClauses := make([]string, 0, len(req.Set))
-	args := []any{}
+	decode(r, &req)
+	setClauses, args := []string{}, []any{}
 	for col, val := range req.Set {
 		setClauses = append(setClauses, fmt.Sprintf("`%s` = ?", col))
 		args = append(args, fmt.Sprintf("%v", val))
@@ -316,23 +393,20 @@ func replicateUpdate(w http.ResponseWriter, r *http.Request) {
 		query += " WHERE " + cond
 		args = append(args, whereArgs...)
 	}
-	if _, err := db.Exec(query, args...); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
+	db.Exec(query, args...)
 	respond(w, http.StatusOK, map[string]string{"status": "replicated"})
 }
 
 func replicateDelete(w http.ResponseWriter, r *http.Request) {
+	if !isInternal(w, r) {
+		return
+	}
 	var req struct {
 		DB    string         `json:"db"`
 		Table string         `json:"table"`
 		Where map[string]any `json:"where"`
 	}
-	if err := decode(r, &req); err != nil {
-		respond(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
+	decode(r, &req)
 	query := fmt.Sprintf("DELETE FROM `%s`.`%s`", req.DB, req.Table)
 	args := []any{}
 	if len(req.Where) > 0 {
@@ -340,24 +414,21 @@ func replicateDelete(w http.ResponseWriter, r *http.Request) {
 		query += " WHERE " + cond
 		args = whereArgs
 	}
-	if _, err := db.Exec(query, args...); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
+	db.Exec(query, args...)
 	respond(w, http.StatusOK, map[string]string{"status": "replicated"})
 }
 
 func replicateSnapshot(w http.ResponseWriter, r *http.Request) {
+	if !isInternal(w, r) {
+		return
+	}
 	var snapshot struct {
 		Databases map[string]map[string]struct {
 			Attributes []string         `json:"attributes"`
 			Records    []map[string]any `json:"records"`
 		} `json:"databases"`
 	}
-	if err := decode(r, &snapshot); err != nil {
-		respond(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
+	decode(r, &snapshot)
 	for dbName, tables := range snapshot.Databases {
 		db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", dbName))
 		for tblName, tbl := range tables {
@@ -368,34 +439,120 @@ func replicateSnapshot(w http.ResponseWriter, r *http.Request) {
 					colDefs = append(colDefs, fmt.Sprintf("`%s` TEXT", a))
 				}
 			}
-			db.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s`.`%s` (%s)", dbName, tblName, strings.Join(colDefs, ", ")))
+			db.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s`.`%s` (%s)",
+				dbName, tblName, strings.Join(colDefs, ", ")))
 			for _, rec := range tbl.Records {
-				cols := make([]string, 0)
-				placeholders := make([]string, 0)
-				vals := make([]any, 0)
+				cols, phs, vals := []string{}, []string{}, []any{}
 				for col, val := range rec {
 					cols = append(cols, fmt.Sprintf("`%s`", col))
-					placeholders = append(placeholders, "?")
+					phs = append(phs, "?")
 					vals = append(vals, fmt.Sprintf("%v", val))
 				}
-				db.Exec(fmt.Sprintf(
-					"INSERT INTO `%s`.`%s` (%s) VALUES (%s)",
-					dbName, tblName,
-					strings.Join(cols, ", "),
-					strings.Join(placeholders, ", "),
-				), vals...)
+				db.Exec(fmt.Sprintf("INSERT INTO `%s`.`%s` (%s) VALUES (%s)",
+					dbName, tblName, strings.Join(cols, ", "), strings.Join(phs, ", ")), vals...)
 			}
 		}
 	}
 	respond(w, http.StatusOK, map[string]string{"status": "snapshot applied"})
 }
 
-// ── SELECT (read-only) ────────────────────────────────────────────────────
+// ════════════════════════════════════════════════════════════════════════════
+//  CLIENT ENDPOINTS
+// ════════════════════════════════════════════════════════════════════════════
 
-func localSelect(w http.ResponseWriter, r *http.Request) {
+// GET /health already registered above
+
+// POST /db/create  — master-only
+func queryCreateDB(w http.ResponseWriter, r *http.Request) {
+	if !canManageDB() {
+		respond(w, http.StatusForbidden, map[string]string{"error": "only the master can create databases"})
+		return
+	}
+	var req struct {
+		DB string `json:"db"`
+	}
+	if err := decode(r, &req); err != nil || req.DB == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "'db' is required"})
+		return
+	}
+	if _, err := db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", req.DB)); err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	broadcast("/replicate/db/create", map[string]any{"db": req.DB})
+	respond(w, http.StatusCreated, map[string]string{"message": "database '" + req.DB + "' created", "served_by": selfRole()})
+}
+
+// DELETE /db/drop  — master-only
+func queryDropDB(w http.ResponseWriter, r *http.Request) {
+	if !canManageDB() {
+		respond(w, http.StatusForbidden, map[string]string{"error": "only the master can drop databases"})
+		return
+	}
+	var req struct {
+		DB string `json:"db"`
+	}
+	if err := decode(r, &req); err != nil || req.DB == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "'db' is required"})
+		return
+	}
+	if _, err := db.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", req.DB)); err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	broadcast("/replicate/db/drop", map[string]any{"db": req.DB})
+	respond(w, http.StatusOK, map[string]string{"message": "database '" + req.DB + "' dropped", "served_by": selfRole()})
+}
+
+// POST /table/create
+func queryCreateTable(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DB         string   `json:"db"`
+		Table      string   `json:"table"`
+		Attributes []string `json:"attributes"`
+	}
+	if err := decode(r, &req); err != nil || req.DB == "" || req.Table == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "'db', 'table', and 'attributes' are required"})
+		return
+	}
+	db.Exec(fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", req.DB))
+	colDefs := []string{"`id` INT AUTO_INCREMENT PRIMARY KEY"}
+	for _, a := range req.Attributes {
+		if strings.ToLower(a) != "id" {
+			colDefs = append(colDefs, fmt.Sprintf("`%s` TEXT", a))
+		}
+	}
+	if _, err := db.Exec(fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s`.`%s` (%s)",
+		req.DB, req.Table, strings.Join(colDefs, ", "))); err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	broadcast("/replicate/table/create", map[string]any{"db": req.DB, "table": req.Table, "attributes": req.Attributes})
+	respond(w, http.StatusCreated, map[string]string{"message": "table '" + req.Table + "' created", "served_by": selfRole()})
+}
+
+// DELETE /table/drop
+func queryDropTable(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DB    string `json:"db"`
+		Table string `json:"table"`
+	}
+	if err := decode(r, &req); err != nil || req.DB == "" || req.Table == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "'db' and 'table' are required"})
+		return
+	}
+	if _, err := db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`.`%s`", req.DB, req.Table)); err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	broadcast("/replicate/table/drop", map[string]any{"db": req.DB, "table": req.Table})
+	respond(w, http.StatusOK, map[string]string{"message": "table '" + req.Table + "' dropped", "served_by": selfRole()})
+}
+
+// GET /query/select?db=x&table=y[&col=val...]
+func querySelect(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	dbName := q.Get("db")
-	table := q.Get("table")
+	dbName, table := q.Get("db"), q.Get("table")
 	if dbName == "" || table == "" {
 		respond(w, http.StatusBadRequest, map[string]string{"error": "'db' and 'table' are required"})
 		return
@@ -419,25 +576,15 @@ func localSelect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer rows.Close()
-	records, err := scanRows(rows)
-	if err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
+	records, _ := scanRows(rows)
 	if records == nil {
 		records = []map[string]any{}
 	}
-	respond(w, http.StatusOK, map[string]any{
-		"count":     len(records),
-		"records":   records,
-		"served_by": selfRole + " :8081",
-	})
+	respond(w, http.StatusOK, map[string]any{"count": len(records), "records": records, "served_by": selfRole()})
 }
 
-// ── LOCAL WRITE ENDPOINTS (bidirectional: apply locally + broadcast) ──────
-
 // POST /query/insert
-func localInsert(w http.ResponseWriter, r *http.Request) {
+func queryInsert(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB     string         `json:"db"`
 		Table  string         `json:"table"`
@@ -447,50 +594,33 @@ func localInsert(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusBadRequest, map[string]string{"error": "'db', 'table', and 'record' are required"})
 		return
 	}
-	cols := make([]string, 0, len(req.Record))
-	placeholders := make([]string, 0, len(req.Record))
-	values := make([]any, 0, len(req.Record))
+	cols, phs, vals := []string{}, []string{}, []any{}
 	for col, val := range req.Record {
 		if strings.ToLower(col) == "id" {
 			continue
 		}
 		cols = append(cols, fmt.Sprintf("`%s`", col))
-		placeholders = append(placeholders, "?")
-		values = append(values, fmt.Sprintf("%v", val))
+		phs = append(phs, "?")
+		vals = append(vals, fmt.Sprintf("%v", val))
 	}
-	result, err := db.Exec(fmt.Sprintf(
-		"INSERT INTO `%s`.`%s` (%s) VALUES (%s)",
-		req.DB, req.Table,
-		strings.Join(cols, ", "),
-		strings.Join(placeholders, ", "),
-	), values...)
+	result, err := db.Exec(fmt.Sprintf("INSERT INTO `%s`.`%s` (%s) VALUES (%s)",
+		req.DB, req.Table, strings.Join(cols, ", "), strings.Join(phs, ", ")), vals...)
 	if err != nil {
 		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	generatedID, _ := result.LastInsertId()
-
-	// Include the generated id so all peers stay in sync on the same id.
-	broadcastRecord := make(map[string]any, len(req.Record)+1)
+	broadcastRecord := make(map[string]any)
 	for k, v := range req.Record {
 		broadcastRecord[k] = v
 	}
 	broadcastRecord["id"] = generatedID
-	broadcast("/replicate/query/insert", map[string]any{
-		"db":     req.DB,
-		"table":  req.Table,
-		"record": broadcastRecord,
-	})
-
-	respond(w, http.StatusCreated, map[string]any{
-		"message":      "record inserted",
-		"generated_id": generatedID,
-		"served_by":    selfRole + " :8081",
-	})
+	broadcast("/replicate/query/insert", map[string]any{"db": req.DB, "table": req.Table, "record": broadcastRecord})
+	respond(w, http.StatusCreated, map[string]any{"message": "record inserted", "generated_id": generatedID, "served_by": selfRole()})
 }
 
 // PUT /query/update
-func localUpdate(w http.ResponseWriter, r *http.Request) {
+func queryUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB    string         `json:"db"`
 		Table string         `json:"table"`
@@ -501,8 +631,7 @@ func localUpdate(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusBadRequest, map[string]string{"error": "'db', 'table', 'where', and 'set' are required"})
 		return
 	}
-	setClauses := make([]string, 0, len(req.Set))
-	args := []any{}
+	setClauses, args := []string{}, []any{}
 	for col, val := range req.Set {
 		setClauses = append(setClauses, fmt.Sprintf("`%s` = ?", col))
 		args = append(args, fmt.Sprintf("%v", val))
@@ -519,23 +648,12 @@ func localUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	affected, _ := result.RowsAffected()
-
-	broadcast("/replicate/query/update", map[string]any{
-		"db":    req.DB,
-		"table": req.Table,
-		"where": req.Where,
-		"set":   req.Set,
-	})
-
-	respond(w, http.StatusOK, map[string]any{
-		"message":         "update complete",
-		"records_updated": affected,
-		"served_by":       selfRole + " :8081",
-	})
+	broadcast("/replicate/query/update", map[string]any{"db": req.DB, "table": req.Table, "where": req.Where, "set": req.Set})
+	respond(w, http.StatusOK, map[string]any{"message": "update complete", "records_updated": affected, "served_by": selfRole()})
 }
 
 // DELETE /query/delete
-func localDelete(w http.ResponseWriter, r *http.Request) {
+func queryDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB    string         `json:"db"`
 		Table string         `json:"table"`
@@ -558,18 +676,8 @@ func localDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	affected, _ := result.RowsAffected()
-
-	broadcast("/replicate/query/delete", map[string]any{
-		"db":    req.DB,
-		"table": req.Table,
-		"where": req.Where,
-	})
-
-	respond(w, http.StatusOK, map[string]any{
-		"message":         "delete complete",
-		"records_deleted": affected,
-		"served_by":       selfRole + " :8081",
-	})
+	broadcast("/replicate/query/delete", map[string]any{"db": req.DB, "table": req.Table, "where": req.Where})
+	respond(w, http.StatusOK, map[string]any{"message": "delete complete", "records_deleted": affected, "served_by": selfRole()})
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────
@@ -579,16 +687,13 @@ func main() {
 		log.Fatal("Cannot connect to MySQL:", err)
 	}
 	log.Println("Go slave connected to MySQL")
-
-	// Start background master health watcher
-	go masterWatcher()
+	startMasterWatcher()
 
 	mux := http.NewServeMux()
 
-	// Health
 	mux.HandleFunc("/health", healthHandler)
 
-	// Replication receivers (called by master OR other slaves)
+	// Replication receivers (internal only)
 	mux.HandleFunc("/replicate/db/create", replicateCreateDB)
 	mux.HandleFunc("/replicate/db/drop", replicateDropDB)
 	mux.HandleFunc("/replicate/table/create", replicateCreateTable)
@@ -598,36 +703,48 @@ func main() {
 	mux.HandleFunc("/replicate/query/delete", replicateDelete)
 	mux.HandleFunc("/replicate/snapshot", replicateSnapshot)
 
-	// Client-facing endpoints (apply locally + broadcast to all peers)
-	mux.HandleFunc("/query/select", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+	// Client endpoints
+	mux.HandleFunc("/db/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			queryCreateDB(w, r)
 		}
-		localSelect(w, r)
+	})
+	mux.HandleFunc("/db/drop", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			queryDropDB(w, r)
+		}
+	})
+	mux.HandleFunc("/table/create", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			queryCreateTable(w, r)
+		}
+	})
+	mux.HandleFunc("/table/drop", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			queryDropTable(w, r)
+		}
+	})
+	mux.HandleFunc("/query/select", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			querySelect(w, r)
+		}
 	})
 	mux.HandleFunc("/query/insert", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+		if r.Method == http.MethodPost {
+			queryInsert(w, r)
 		}
-		localInsert(w, r)
 	})
 	mux.HandleFunc("/query/update", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPut {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+		if r.Method == http.MethodPut {
+			queryUpdate(w, r)
 		}
-		localUpdate(w, r)
 	})
 	mux.HandleFunc("/query/delete", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
+		if r.Method == http.MethodDelete {
+			queryDelete(w, r)
 		}
-		localDelete(w, r)
 	})
 
-	log.Printf("Go slave (%s) listening on :8081", selfRole)
-	log.Fatal(http.ListenAndServe(":8081", mux))
+	log.Printf("Go slave listening on %s", listenPort)
+	log.Fatal(http.ListenAndServe(listenPort, mux))
 }

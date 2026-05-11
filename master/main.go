@@ -10,26 +10,24 @@ import (
 	"time"
 )
 
-// ── MySQL connection config ───────────────────────────────────────────────
-// Change these to match your MySQL setup.
+// ── config ───────────────────────────────────────────────
 const (
 	mysqlUser     = "root"
 	mysqlPassword = "root"
 	mysqlHost     = "127.0.0.1"
-	mysqlPort     = "3306"
+	mysqlPort     = ":3306"
+	masterPort    = ":8080"
 )
 
 func main() {
 	// ── 1. Connect to MySQL ──────────────────────────────────────────────
-	dsn := mysqlUser + ":" + mysqlPassword + "@tcp(" + mysqlHost + ":" + mysqlPort + ")/"
+	dsn := mysqlUser + ":" + mysqlPassword + "@tcp(" + mysqlHost + mysqlPort + ")/"
 	if err := storage.Connect(dsn); err != nil {
 		log.Fatal("Cannot connect to MySQL:", err)
 	}
-	log.Println("Connected to MySQL at", mysqlHost+":"+mysqlPort)
+	log.Println("Connected to MySQL at", mysqlHost+mysqlPort)
 
 	// ── 2. Start the write-queue worker goroutine ────────────────────────
-	// All INSERT / UPDATE / DELETE requests are serialised through the
-	// WriteQueue channel.  No mutex needed on the handler side.
 	replication.StartWriteWorker(
 		storage.InsertRecord,
 		storage.UpdateRecords,
@@ -67,8 +65,6 @@ func main() {
 
 	// Replication management
 	mux.HandleFunc("/replication/status", replicationStatus)
-	mux.HandleFunc("/replication/add", replicationAdd)
-
 	mux.HandleFunc("/replicate/query/insert", method("POST", replication.ReceiveInsert))
 	mux.HandleFunc("/replicate/query/update", method("POST", replication.ReceiveUpdate))
 	mux.HandleFunc("/replicate/query/delete", method("POST", replication.ReceiveDelete))
@@ -78,8 +74,8 @@ func main() {
 	mux.HandleFunc("/snapshot", method("GET", replication.ServeSnapshot(buildSnapshot)))
 
 	// ── 5. Start HTTP server ─────────────────────────────────────────────
-	log.Println("Master node listening on :8080")
-	if err := http.ListenAndServe(":8080", mux); err != nil {
+	log.Println("Master node listening on ", masterPort)
+	if err := http.ListenAndServe(masterPort, mux); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -99,24 +95,6 @@ func method(m string, h http.HandlerFunc) http.HandlerFunc {
 func replicationStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"slaves": replication.Status()})
-}
-
-// POST /replication/add  body: { "url": "http://localhost:8084" }
-func replicationAdd(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		URL string `json:"url"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.URL == "" {
-		http.Error(w, `{"error":"field 'url' is required"}`, http.StatusBadRequest)
-		return
-	}
-	replication.AddSlave(req.URL)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"message": "slave registered: " + req.URL})
 }
 
 // buildSnapshot reads the full state from MySQL and returns it as a map.

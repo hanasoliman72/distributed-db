@@ -1,25 +1,20 @@
 using System.Text.Json;
 using MySqlConnector;
 
-// ════════════════════════════════════════════════════════════════════════════
-//  .NET Slave Node  –  port 8080 (or set env SLAVE_PORT)
-//  Mirrors python slave: master-watcher, acting-master promotion, broadcaster
-// ════════════════════════════════════════════════════════════════════════════
-
 const string MysqlUser     = "root";
 const string MysqlPassword = "root";
 const string MysqlHost     = "127.0.0.1";
 const string MysqlPort     = "3306";
-const string SlavePort     = "8080";
+const string SlavePort     = "8081";
 
-const string SelfAddr   = "http://127.0.0.1:8080";
-const string MasterAddr = "http://192.168.16.30:8080";
+const string SelfAddr   = "http://127.0.0.1:8081";
+const string MasterAddr = "http://127.0.0.1:8080";
 
-// All peers except self — master will be skipped when it is down
 var peers = new List<string>
 {
     MasterAddr,
-    "http://192.168.16.9:8080",   // slave-go  (add others here)
+    "http://127.0.0.1:8082",// Go slave
+    "http://127.0.0.1:8083",// Python slave
 };
 
 var connStr = $"Server={MysqlHost};Port={MysqlPort};User ID={MysqlUser};Password={MysqlPassword};AllowPublicKeyRetrieval=true;SslMode=None;";
@@ -358,13 +353,6 @@ app.MapPost("/replicate/snapshot", async (HttpRequest req) =>
     catch (Exception ex) { return Fail(ex.Message); }
 });
 
-// ════════════════════════════════════════════════════════════════════════════
-//  CLIENT-FACING ENDPOINTS
-//
-//  DB create/drop  → only when acting master (master is down)
-//  Table + rows    → always allowed; apply locally then broadcast to all peers
-// ════════════════════════════════════════════════════════════════════════════
-
 // ── Database ──────────────────────────────────────────────────────────────
 
 // POST /query/db/create
@@ -383,7 +371,7 @@ app.MapPost("/query/db/create", async (HttpRequest req) =>
     }
     catch (Exception ex) { return Fail(ex.Message); }
 
-    Broadcast("/replicate/db/create", new { db }, log);
+    Broadcast("/replicate/db/create", new { db, origin = SelfAddr }, log);
     return Results.Json(new { message = $"database '{db}' created", servedBy = SelfRole() }, jsonOpts, statusCode: 201);
 });
 
@@ -403,7 +391,7 @@ app.MapDelete("/query/db/drop", async (HttpRequest req) =>
     }
     catch (Exception ex) { return Fail(ex.Message); }
 
-    Broadcast("/replicate/db/drop", new { db }, log);
+    Broadcast("/replicate/db/drop", new { db, origin = SelfAddr }, log);
     return Results.Json(new { message = $"database '{db}' dropped", servedBy = SelfRole() }, jsonOpts);
 });
 
@@ -431,7 +419,7 @@ app.MapPost("/query/table/create", async (HttpRequest req) =>
     }
     catch (Exception ex) { return Fail(ex.Message); }
 
-    Broadcast("/replicate/table/create", new { db, table, attributes = attrs }, log);
+    Broadcast("/replicate/table/create", new { db, table, attributes = attrs, origin = SelfAddr }, log);
     return Results.Json(new { message = $"table '{table}' created", servedBy = SelfRole() }, jsonOpts, statusCode: 201);
 });
 
@@ -452,7 +440,7 @@ app.MapDelete("/query/table/drop", async (HttpRequest req) =>
     }
     catch (Exception ex) { return Fail(ex.Message); }
 
-    Broadcast("/replicate/table/drop", new { db, table }, log);
+    Broadcast("/replicate/table/drop", new { db, table, origin = SelfAddr }, log);
     return Results.Json(new { message = $"table '{table}' dropped", servedBy = SelfRole() }, jsonOpts);
 });
 
@@ -482,7 +470,7 @@ app.MapGet("/query/select", async (HttpRequest req) =>
 });
 
 // POST /query/insert
-// Body: { "db":"mydb", "table":"users", "record":{"name":"Ali","age":"20"} }
+// Body: { "db":"mydb", "table":"users", "record":{"name":"Hana","age":"22"} }
 app.MapPost("/query/insert", async (HttpRequest req) =>
 {
     var body   = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body);
@@ -511,7 +499,7 @@ app.MapPost("/query/insert", async (HttpRequest req) =>
 
     // broadcast with real id so all peers store the same row
     var broadcastRecord = new Dictionary<string, object?>(record) { ["id"] = generatedId };
-    Broadcast("/replicate/query/insert", new { db, table, record = broadcastRecord }, log);
+    Broadcast("/replicate/query/insert", new { db, table, record = broadcastRecord, origin = SelfAddr }, log);
     return Results.Json(new { message = "record inserted", generatedId, servedBy = SelfRole() }, jsonOpts, statusCode: 201);
 });
 
@@ -544,7 +532,7 @@ app.MapPut("/query/update", async (HttpRequest req) =>
     }
     catch (Exception ex) { return Fail(ex.Message); }
 
-    Broadcast("/replicate/query/update", new { db, table, where, set }, log);
+    Broadcast("/replicate/query/update", new { db, table, where, set, origin = SelfAddr }, log);
     return Results.Json(new { message = "update complete", recordsUpdated = affected, servedBy = SelfRole() }, jsonOpts);
 });
 
@@ -573,7 +561,7 @@ app.MapDelete("/query/delete", async (HttpRequest req) =>
     }
     catch (Exception ex) { return Fail(ex.Message); }
 
-    Broadcast("/replicate/query/delete", new { db, table, where }, log);
+    Broadcast("/replicate/query/delete", new { db, table, where, origin = SelfAddr }, log);
     return Results.Json(new { message = "delete complete", recordsDeleted = affected, servedBy = SelfRole() }, jsonOpts);
 });
 

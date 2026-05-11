@@ -12,23 +12,23 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════
 //  CHANNEL ARCHITECTURE OVERVIEW
 //
-//  1. Slave.stateCh   – every read/write of Slave.alive goes through a
-//                       dedicated goroutine; no mutex anywhere.
+//  1. Slave.stateCh        – every read/write of Slave.alive goes through a
+//                            dedicated goroutine.
 //
-//  2. Broadcast()     – fires one goroutine per slave, collects results
-//                       through a buffered channel (no WaitGroup).
+//  2. Broadcast()          – fires one goroutine per slave, collects results
+//                            through a buffered channel.
 //
-//  3. pushSnapshot()  – one goroutine + one buffered channel for the result.
+//  3. pushSnapshot()       – one goroutine + one buffered channel for the result.
 //
 //  4. StartHealthChecker() – ping goroutines send healthEvent structs into
-//                       an unbuffered eventCh; a consumer goroutine reacts.
+//                            an unbuffered eventCh, a consumer goroutine reacts.
 //
-//  5. WriteQueue      – HTTP handlers push WriteJob structs here; a single
-//                       worker goroutine drains the queue serially and sends
-//                       the outcome back through each job's own ResultCh.
+//  5. WriteQueue           – HTTP handlers push WriteJob structs here; a single
+//                            worker goroutine drains the queue serially and sends
+//                            the outcome back through each job's own ResultCh.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── Slave state (channel-based, zero mutexes) ─────────────────────────────
+// ── Slave state (channel-based) ─────────────────────────────
 
 // slaveStateMsg is the message type sent through Slave.stateCh.
 // If it carries a responseCh it is a read request; otherwise a write.
@@ -84,11 +84,10 @@ func (s *Slave) isAlive() bool {
 }
 
 // ── Slave registry ────────────────────────────────────────────────────────
-
 var Registry = []*Slave{
-	newSlave("http://192.168.16.9:8080", true), // Go slave      – port 8081
-	newSlave("http://192.168.16.11:8082", true), // Python slave  – port 8082
-	//newSlave("http://192.168.16.9:8080", true), // C# slave      – port 8080 (change IP if on another PC)
+	newSlave("http://127.0.0.1:8081", true), // C# slave
+	newSlave("http://127.0.0.1:8082", true), // Go slave
+	newSlave("http://127.0.0.1:8083", true), // Python slave
 }
 
 // ── Broadcast result ──────────────────────────────────────────────────────
@@ -100,11 +99,8 @@ type BroadcastResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// ── Broadcast (pure channel, no WaitGroup) ────────────────────────────────
-
 // Broadcast sends payload as JSON POST to endpoint on every alive slave.
 // One goroutine per slave; results are collected from a buffered channel.
-// Call with `go Broadcast(...)` from handlers to avoid blocking responses.
 func Broadcast(endpoint string, payload any) []BroadcastResult {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -167,7 +163,7 @@ func sendToSlave(s *Slave, endpoint string, body []byte) BroadcastResult {
 	return BroadcastResult{SlaveURL: s.URL, Success: true}
 }
 
-// ── Health checker (channel-based) ───────────────────────────────────────
+// ── Health checker ───────────────────────────────────────
 
 // healthEvent is produced by ping goroutines and consumed by the event loop.
 type healthEvent struct {
@@ -176,7 +172,7 @@ type healthEvent struct {
 }
 
 // StartHealthChecker pings every slave every `interval`.
-// Ping goroutines → eventCh → consumer goroutine (no mutex, no WaitGroup).
+// Ping goroutines → eventCh → consumer goroutine.
 func StartHealthChecker(interval time.Duration, snapshotFn func() map[string]any) {
 	// Unbuffered: consumer must be ready before any ping goroutine can send.
 	eventCh := make(chan healthEvent)
@@ -225,7 +221,7 @@ func ping(baseURL string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// ── Snapshot push (channel-based) ────────────────────────────────────────
+// ── Snapshot push ────────────────────────────────────────
 
 // pushSnapshot sends the full current state to a slave that just recovered.
 // Uses a buffered channel to collect the result from its own goroutine.
@@ -251,7 +247,7 @@ func pushSnapshot(s *Slave, snapshot map[string]any) {
 	}
 }
 
-// ── Write queue (channel-based serialised writes) ─────────────────────────
+// ── Write queue ─────────────────────────
 
 // WriteJob is pushed by HTTP handlers into WriteQueue.
 // The handler blocks on ResultCh until the worker finishes – serialising
@@ -266,8 +262,6 @@ type WriteJob struct {
 	ResultCh  chan error     // worker sends outcome back here
 }
 
-// WriteQueue is the global write channel. Buffer of 100 lets handlers
-// queue without blocking unless there is a genuine backlog.
 var WriteQueue = make(chan WriteJob, 100)
 
 // StartWriteWorker launches the single goroutine that drains WriteQueue.
@@ -311,16 +305,4 @@ func Status() []SlaveStatus {
 		out[i] = SlaveStatus{URL: s.URL, Alive: s.isAlive()}
 	}
 	return out
-}
-
-// AddSlave registers a new slave at runtime (/replication/add endpoint).
-func AddSlave(url string) {
-	for _, s := range Registry {
-		if s.URL == url {
-			log.Printf("[replication] slave %s already registered", url)
-			return
-		}
-	}
-	Registry = append(Registry, newSlave(url, true))
-	log.Printf("[replication] new slave registered: %s", url)
 }

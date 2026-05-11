@@ -27,3 +27,32 @@ C:\Users\MK\Desktop\fourth year second term\Distributed Database\DDB Project\dis
 C:\Users\MK\Desktop\fourth year second term\Distributed Database\DDB Project\distributed-db\slave-dotNet\obj\Debug\net8.0\Slavenode.pdb
 C:\Users\MK\Desktop\fourth year second term\Distributed Database\DDB Project\distributed-db\slave-dotNet\obj\Debug\net8.0\Slavenode.genruntimeconfig.cache
 C:\Users\MK\Desktop\fourth year second term\Distributed Database\DDB Project\distributed-db\slave-dotNet\obj\Debug\net8.0\ref\Slavenode.dll
+D:\VS Code Projects\Distributed Database\slave-dotNet\bin\Debug\net8.0\Slavenode.staticwebassets.endpoints.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\bin\Debug\net8.0\Slavenode.exe
+D:\VS Code Projects\Distributed Database\slave-dotNet\bin\Debug\net8.0\Slavenode.deps.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\bin\Debug\net8.0\Slavenode.runtimeconfig.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\bin\Debug\net8.0\Slavenode.dll
+D:\VS Code Projects\Distributed Database\slave-dotNet\bin\Debug\net8.0\Slavenode.pdb
+D:\VS Code Projects\Distributed Database\slave-dotNet\bin\Debug\net8.0\MySqlConnector.dll
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.csproj.AssemblyReference.cache
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\rpswa.dswa.cache.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.GeneratedMSBuildEditorConfig.editorconfig
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.AssemblyInfoInputs.cache
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.AssemblyInfo.cs
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.csproj.CoreCompileInputs.cache
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.MvcApplicationPartsAssemblyInfo.cache
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.sourcelink.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\rjimswa.dswa.cache.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\rjsmrazor.dswa.cache.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\rjsmcshtml.dswa.cache.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\scopedcss\bundle\Slavenode.styles.css
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\staticwebassets.build.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\staticwebassets.build.json.cache
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\staticwebassets.development.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\staticwebassets.build.endpoints.json
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.csproj.Up2Date
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.dll
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\refint\Slavenode.dll
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.pdb
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\Slavenode.genruntimeconfig.cache
+D:\VS Code Projects\Distributed Database\slave-dotNet\obj\Debug\net8.0\ref\Slavenode.dll
