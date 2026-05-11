@@ -168,6 +168,32 @@ func InsertRecord(db, table string, record map[string]any) (int64, error) {
 	return result.LastInsertId()
 }
 
+// InsertRecordIgnore inserts using INSERT IGNORE INTO, preserving the explicit
+// id from a replication broadcast. If the row already exists (same primary key
+// — happens when all nodes share one MySQL on a single dev machine) the
+// statement is silently skipped, preventing duplicate rows.
+func InsertRecordIgnore(db, table string, record map[string]any) error {
+	if len(record) == 0 {
+		return fmt.Errorf("record cannot be empty")
+	}
+	cols := make([]string, 0, len(record))
+	placeholders := make([]string, 0, len(record))
+	values := make([]any, 0, len(record))
+	for col, val := range record {
+		cols = append(cols, fmt.Sprintf("`%s`", col))
+		placeholders = append(placeholders, "?")
+		values = append(values, fmt.Sprintf("%v", val))
+	}
+	query := fmt.Sprintf(
+		"INSERT IGNORE INTO `%s`.`%s` (%s) VALUES (%s)",
+		db, table,
+		strings.Join(cols, ", "),
+		strings.Join(placeholders, ", "),
+	)
+	_, err := DB.Exec(query, values...)
+	return err
+}
+
 // SelectRecords returns rows matching ALL key=value pairs in where.
 // Pass nil or empty map to return ALL rows.
 //

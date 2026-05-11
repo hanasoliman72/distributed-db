@@ -214,7 +214,7 @@ def replicate_insert():
     phs    = ["%s" for _ in record]
     vals   = [str(v) for v in record.values()]
     _, _, err = exec_write(
-        f"INSERT INTO `{db}`.`{table}` ({', '.join(cols)}) VALUES ({', '.join(phs)})", vals)
+        f"INSERT IGNORE INTO `{db}`.`{table}` ({', '.join(cols)}) VALUES ({', '.join(phs)})", vals)
     if err: return jsonify({"error": err}), 500
     return jsonify({"status": "replicated"})
 
@@ -270,7 +270,7 @@ def replicate_snapshot():
                     phs  = ["%s" for _ in rec]
                     vals = [str(v) for v in rec.values()]
                     cur.execute(
-                        f"INSERT INTO `{db_name}`.`{tbl_name}` ({', '.join(cols)}) VALUES ({', '.join(phs)})",
+                        f"INSERT IGNORE INTO `{db_name}`.`{tbl_name}` ({', '.join(cols)}) VALUES ({', '.join(phs)})",
                         vals)
         conn.commit()
     except Exception as e:
@@ -288,7 +288,7 @@ def replicate_snapshot():
 
 # ── Database (master-only) ────────────────────────────────────────────────
 
-@app.route("/query/db/create", methods=["POST"])
+@app.route("/db/create", methods=["POST"])
 def query_create_db():
     if not can_manage_db():
         return jsonify({"error": "only the master can create databases",
@@ -300,7 +300,7 @@ def query_create_db():
     broadcast("/replicate/db/create", {"db": db})
     return jsonify({"message": f"database '{db}' created", "served_by": self_role()}), 201
 
-@app.route("/query/db/drop", methods=["DELETE"])
+@app.route("/db/drop", methods=["DELETE"])
 def query_drop_db():
     if not can_manage_db():
         return jsonify({"error": "only the master can drop databases",
@@ -314,7 +314,7 @@ def query_drop_db():
 
 # ── Tables (always allowed) ───────────────────────────────────────────────
 
-@app.route("/query/table/create", methods=["POST"])
+@app.route("/table/create", methods=["POST"])
 def query_create_table():
     data  = request.get_json()
     db    = data.get("db"); table = data.get("table"); attrs = data.get("attributes", [])
@@ -331,7 +331,7 @@ def query_create_table():
     broadcast("/replicate/table/create", {"db": db, "table": table, "attributes": attrs, "origin": SELF_ADDR})
     return jsonify({"message": f"table '{table}' created", "served_by": self_role()}), 201
 
-@app.route("/query/table/drop", methods=["DELETE"])
+@app.route("/table/drop", methods=["DELETE"])
 def query_drop_table():
     data = request.get_json(); db = data.get("db"); table = data.get("table")
     if not db or not table:
@@ -364,7 +364,7 @@ def local_select():
         return jsonify({"error": err}), 500
 
     return jsonify({"count": len(records), "records": records,
-                    "served_by": self_role() + " :8083"})
+                    "served_by": self_role()})
 
 @app.route("/query/insert", methods=["POST"])
 def local_insert():
@@ -386,7 +386,7 @@ def local_insert():
     broadcast_record["id"] = generated_id
     broadcast("/replicate/query/insert", {"db": db, "table": table, "record": broadcast_record, "origin": SELF_ADDR})
     return jsonify({"message": "record inserted", "generated_id": generated_id,
-                    "served_by": self_role() + " :8083"}), 201
+                    "served_by": self_role()}), 201
 
 @app.route("/query/update", methods=["PUT"])
 def local_update():
@@ -409,7 +409,7 @@ def local_update():
 
     broadcast("/replicate/query/update", {"db": db, "table": table, "where": where, "set": set_, "origin": SELF_ADDR})
     return jsonify({"message": "update complete", "records_updated": affected,
-                    "served_by": self_role() + " :8083"})
+                    "served_by": self_role()})
 
 @app.route("/query/delete", methods=["DELETE"])
 def local_delete():
@@ -428,7 +428,7 @@ def local_delete():
 
     broadcast("/replicate/query/delete", {"db": db, "table": table, "where": where, "origin": SELF_ADDR})
     return jsonify({"message": "delete complete", "records_deleted": affected,
-                    "served_by": self_role() + " :8083"})
+                    "served_by": self_role()})
 
 # ── Full-text search (Python-only) ────────────────────────────────────────
 
@@ -449,7 +449,7 @@ def full_text_search():
     matched = [row for row in all_rows
                if any(term_lower in str(v).lower() for v in row.values() if v is not None)]
     return jsonify({"search_term": term, "count": len(matched), "records": matched,
-                    "served_by": self_role() + " :8083 (full-text search)"})
+                    "served_by": self_role()})
 
 # ── Entry point ───────────────────────────────────────────────────────────
 if __name__ == "__main__":

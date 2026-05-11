@@ -56,6 +56,7 @@ func main() {
 	mux.HandleFunc("/query/select", method("GET", handlers.Select))
 	mux.HandleFunc("/query/update", method("PUT", handlers.Update))
 	mux.HandleFunc("/query/delete", method("DELETE", handlers.Delete))
+	mux.HandleFunc("/query/search", method("GET", handlers.Search))
 
 	// Health
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

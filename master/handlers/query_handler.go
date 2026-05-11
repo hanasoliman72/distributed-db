@@ -1,9 +1,11 @@
 package handlers
 
 import (
+	"fmt"
 	"master/replication"
 	"master/storage"
 	"net/http"
+	"strings"
 )
 
 // ── /query/insert  POST ───────────────────────────────────────────────────
@@ -194,4 +196,44 @@ func Delete(w http.ResponseWriter, r *http.Request) {
 	})
 
 	respond(w, http.StatusOK, map[string]string{"message": "delete complete"})
+}
+
+// GET /query/search?db=mydb&table=users&q=ali
+func Search(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	db := q.Get("db")
+	table := q.Get("table")
+	term := strings.TrimSpace(q.Get("q"))
+
+	if db == "" || table == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "'db' and 'table' are required"})
+		return
+	}
+	if term == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "'q' (search term) is required"})
+		return
+	}
+
+	all, err := storage.SelectRecords(db, table, map[string]any{})
+	if err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	termLower := strings.ToLower(term)
+	matched := []map[string]any{}
+	for _, row := range all {
+		for _, v := range row {
+			if strings.Contains(strings.ToLower(fmt.Sprintf("%v", v)), termLower) {
+				matched = append(matched, row)
+				break
+			}
+		}
+	}
+
+	respond(w, http.StatusOK, map[string]any{
+		"search_term": term,
+		"count":       len(matched),
+		"records":     matched,
+	})
 }

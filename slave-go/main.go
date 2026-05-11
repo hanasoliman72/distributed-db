@@ -366,7 +366,7 @@ func replicateInsert(w http.ResponseWriter, r *http.Request) {
 		phs = append(phs, "?")
 		vals = append(vals, fmt.Sprintf("%v", val))
 	}
-	db.Exec(fmt.Sprintf("INSERT INTO `%s`.`%s` (%s) VALUES (%s)",
+	db.Exec(fmt.Sprintf("INSERT IGNORE INTO `%s`.`%s` (%s) VALUES (%s)",
 		req.DB, req.Table, strings.Join(cols, ", "), strings.Join(phs, ", ")), vals...)
 	respond(w, http.StatusOK, map[string]string{"status": "replicated"})
 }
@@ -448,7 +448,7 @@ func replicateSnapshot(w http.ResponseWriter, r *http.Request) {
 					phs = append(phs, "?")
 					vals = append(vals, fmt.Sprintf("%v", val))
 				}
-				db.Exec(fmt.Sprintf("INSERT INTO `%s`.`%s` (%s) VALUES (%s)",
+				db.Exec(fmt.Sprintf("INSERT IGNORE INTO `%s`.`%s` (%s) VALUES (%s)",
 					dbName, tblName, strings.Join(cols, ", "), strings.Join(phs, ", ")), vals...)
 			}
 		}
@@ -680,6 +680,38 @@ func queryDelete(w http.ResponseWriter, r *http.Request) {
 	respond(w, http.StatusOK, map[string]any{"message": "delete complete", "records_deleted": affected, "served_by": selfRole()})
 }
 
+// GET /query/search?db=x&table=y&q=term
+func querySearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	dbName, table, term := q.Get("db"), q.Get("table"), strings.TrimSpace(q.Get("q"))
+	if dbName == "" || table == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "'db' and 'table' are required"})
+		return
+	}
+	if term == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "'q' (search term) is required"})
+		return
+	}
+	rows, err := db.Query(fmt.Sprintf("SELECT * FROM `%s`.`%s`", dbName, table))
+	if err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	all, _ := scanRows(rows)
+	termLower := strings.ToLower(term)
+	matched := []map[string]any{}
+	for _, row := range all {
+		for _, v := range row {
+			if strings.Contains(strings.ToLower(fmt.Sprintf("%v", v)), termLower) {
+				matched = append(matched, row)
+				break
+			}
+		}
+	}
+	respond(w, http.StatusOK, map[string]any{"search_term": term, "count": len(matched), "records": matched, "served_by": selfRole()})
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────
 
 func main() {
@@ -742,6 +774,11 @@ func main() {
 	mux.HandleFunc("/query/delete", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			queryDelete(w, r)
+		}
+	})
+	mux.HandleFunc("/query/search", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			querySearch(w, r)
 		}
 	})
 

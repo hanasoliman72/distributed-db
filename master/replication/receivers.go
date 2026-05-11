@@ -86,7 +86,7 @@ func ReceiveInsert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := storage.InsertRecord(req.DB, req.Table, req.Record); err != nil {
+	if err := storage.InsertRecordIgnore(req.DB, req.Table, req.Record); err != nil {
 		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}

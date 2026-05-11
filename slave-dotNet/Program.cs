@@ -107,10 +107,10 @@ List<string> GetStringList(JsonElement root, string prop) =>
         ? el.EnumerateArray().Select(x => x.GetString() ?? "").ToList()
         : new();
 
-IResult Ok(object data)       => Results.Json(new { success = true,  data }, jsonOpts);
-IResult Fail(string msg)      => Results.Json(new { success = false, error = msg }, jsonOpts, statusCode: 500);
-IResult Bad(string msg)       => Results.Json(new { success = false, error = msg }, jsonOpts, statusCode: 400);
-IResult Forbidden(string msg) => Results.Json(new { success = false, error = msg, tip = $"Send this request to the master at {MasterAddr}" }, jsonOpts, statusCode: 403);
+IResult Ok(object data)       => Results.Json(data, jsonOpts);
+IResult Fail(string msg)      => Results.Json(new { error = msg }, jsonOpts, statusCode: 500);
+IResult Bad(string msg)       => Results.Json(new { error = msg }, jsonOpts, statusCode: 400);
+IResult Forbidden(string msg) => Results.Json(new { error = msg, tip = $"Send this request to the master at {MasterAddr}" }, jsonOpts, statusCode: 403);
 
 // ── Broadcaster (fire-and-forget POST to all peers) ───────────────────────
 void Broadcast(string path, object payload, ILogger logger)
@@ -357,7 +357,7 @@ app.MapPost("/replicate/snapshot", async (HttpRequest req) =>
 
 // POST /query/db/create
 // Body: { "db": "mydb" }
-app.MapPost("/query/db/create", async (HttpRequest req) =>
+app.MapPost("/db/create", async (HttpRequest req) =>
 {
     if (!CanManageDb()) return Forbidden("Database create/drop is only allowed on the master node.");
 
@@ -372,12 +372,12 @@ app.MapPost("/query/db/create", async (HttpRequest req) =>
     catch (Exception ex) { return Fail(ex.Message); }
 
     Broadcast("/replicate/db/create", new { db, origin = SelfAddr }, log);
-    return Results.Json(new { message = $"database '{db}' created", servedBy = SelfRole() }, jsonOpts, statusCode: 201);
+    return Results.Json(new { message = $"database '{db}' created", served_by = SelfRole() }, jsonOpts, statusCode: 201);
 });
 
-// DELETE /query/db/drop
+// DELETE /db/drop
 // Body: { "db": "mydb" }
-app.MapDelete("/query/db/drop", async (HttpRequest req) =>
+app.MapDelete("/db/drop", async (HttpRequest req) =>
 {
     if (!CanManageDb()) return Forbidden("Database create/drop is only allowed on the master node.");
 
@@ -392,14 +392,14 @@ app.MapDelete("/query/db/drop", async (HttpRequest req) =>
     catch (Exception ex) { return Fail(ex.Message); }
 
     Broadcast("/replicate/db/drop", new { db, origin = SelfAddr }, log);
-    return Results.Json(new { message = $"database '{db}' dropped", servedBy = SelfRole() }, jsonOpts);
+    return Results.Json(new { message = $"database '{db}' dropped", served_by = SelfRole() }, jsonOpts);
 });
 
 // ── Tables ────────────────────────────────────────────────────────────────
 
-// POST /query/table/create
+// POST /table/create
 // Body: { "db":"mydb", "table":"users", "attributes":["name","age"] }
-app.MapPost("/query/table/create", async (HttpRequest req) =>
+app.MapPost("/table/create", async (HttpRequest req) =>
 {
     var body  = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body);
     var db    = body.GetProperty("db").GetString()    ?? "";
@@ -420,12 +420,12 @@ app.MapPost("/query/table/create", async (HttpRequest req) =>
     catch (Exception ex) { return Fail(ex.Message); }
 
     Broadcast("/replicate/table/create", new { db, table, attributes = attrs, origin = SelfAddr }, log);
-    return Results.Json(new { message = $"table '{table}' created", servedBy = SelfRole() }, jsonOpts, statusCode: 201);
+    return Results.Json(new { message = $"table '{table}' created", served_by = SelfRole() }, jsonOpts, statusCode: 201);
 });
 
-// DELETE /query/table/drop
+// DELETE /table/drop
 // Body: { "db":"mydb", "table":"users" }
-app.MapDelete("/query/table/drop", async (HttpRequest req) =>
+app.MapDelete("/table/drop", async (HttpRequest req) =>
 {
     var body  = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body);
     var db    = body.GetProperty("db").GetString()    ?? "";
@@ -441,7 +441,7 @@ app.MapDelete("/query/table/drop", async (HttpRequest req) =>
     catch (Exception ex) { return Fail(ex.Message); }
 
     Broadcast("/replicate/table/drop", new { db, table, origin = SelfAddr }, log);
-    return Results.Json(new { message = $"table '{table}' dropped", servedBy = SelfRole() }, jsonOpts);
+    return Results.Json(new { message = $"table '{table}' dropped", served_by = SelfRole() }, jsonOpts);
 });
 
 // ── Rows ──────────────────────────────────────────────────────────────────
@@ -464,7 +464,7 @@ app.MapGet("/query/select", async (HttpRequest req) =>
         Dictionary<string, object?>? parms = null;
         if (where.Count > 0) { var (clause, p) = BuildWhere(where); sql += " WHERE " + clause; parms = p; }
         var rows = await QueryRows(sql, parms);
-        return Results.Json(new { count = rows.Count, records = rows, servedBy = SelfRole() }, jsonOpts);
+        return Results.Json(new { count = rows.Count, records = rows, served_by = SelfRole() }, jsonOpts);
     }
     catch (Exception ex) { return Fail(ex.Message); }
 });
@@ -500,7 +500,7 @@ app.MapPost("/query/insert", async (HttpRequest req) =>
     // broadcast with real id so all peers store the same row
     var broadcastRecord = new Dictionary<string, object?>(record) { ["id"] = generatedId };
     Broadcast("/replicate/query/insert", new { db, table, record = broadcastRecord, origin = SelfAddr }, log);
-    return Results.Json(new { message = "record inserted", generatedId, servedBy = SelfRole() }, jsonOpts, statusCode: 201);
+    return Results.Json(new { message = "record inserted", generated_id = generatedId, served_by = SelfRole() }, jsonOpts, statusCode: 201);
 });
 
 // PUT /query/update
@@ -533,7 +533,7 @@ app.MapPut("/query/update", async (HttpRequest req) =>
     catch (Exception ex) { return Fail(ex.Message); }
 
     Broadcast("/replicate/query/update", new { db, table, where, set, origin = SelfAddr }, log);
-    return Results.Json(new { message = "update complete", recordsUpdated = affected, servedBy = SelfRole() }, jsonOpts);
+    return Results.Json(new { message = "update complete", records_updated = affected, served_by = SelfRole() }, jsonOpts);
 });
 
 // DELETE /query/delete
@@ -562,7 +562,7 @@ app.MapDelete("/query/delete", async (HttpRequest req) =>
     catch (Exception ex) { return Fail(ex.Message); }
 
     Broadcast("/replicate/query/delete", new { db, table, where, origin = SelfAddr }, log);
-    return Results.Json(new { message = "delete complete", recordsDeleted = affected, servedBy = SelfRole() }, jsonOpts);
+    return Results.Json(new { message = "delete complete", records_deleted = affected, served_by = SelfRole() }, jsonOpts);
 });
 
 // ── Full-text search across ALL columns (mirrors Python slave) ────────────
@@ -588,7 +588,7 @@ app.MapGet("/query/search", async (HttpRequest req) =>
             .Where(row => row.Values.Any(v => v != null && v.ToString()!.ToLowerInvariant().Contains(termLower)))
             .ToList();
         log.LogInformation("[SEARCH] {Db}.{Tbl} q='{Term}' → {N} row(s)", db, table, term, matched.Count);
-        return Results.Json(new { searchTerm = term, count = matched.Count, records = matched, servedBy = SelfRole() }, jsonOpts);
+        return Results.Json(new { search_term = term, count = matched.Count, records = matched, served_by = SelfRole() }, jsonOpts);
     }
     catch (Exception ex) { return Fail(ex.Message); }
 });
