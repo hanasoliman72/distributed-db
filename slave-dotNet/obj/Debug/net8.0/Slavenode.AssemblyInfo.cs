@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("Slavenode")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+f1f2b3a58d36e7d0267b75f73f652d8c26623cb7")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+af7621ec43c5011602b3d7d1975f831117e2764a")]
 [assembly: System.Reflection.AssemblyProductAttribute("Slavenode")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Slavenode")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
