@@ -22,15 +22,14 @@ import (
 )
 
 const (
-	defaultSharedSecret = "Hana-1234"
-	defaultMysqlHost    = "127.0.0.1"
-	defaultMysqlPort    = "3306"
-	defaultMysqlUser    = "root"
-	defaultMysqlPass    = "root"
-	defaultSlavePort    = ":8081"
-	defaultSlaveID      = "slave-a"
-	defaultMetadataFile = "metadata.json"
-
+	defaultSharedSecret  = "Hana-1234"
+	defaultMysqlHost     = "127.0.0.1"
+	defaultMysqlPort     = "3306"
+	defaultMysqlUser     = "root"
+	defaultMysqlPass     = "root"
+	defaultSlavePort     = ":8081"
+	defaultSlaveID       = "slave-a"
+	defaultMetadataFile  = "metadata.json"
 	gatewayURL           = "http://127.0.0.1:8080"
 	gatewayCheckInterval = 3 * time.Second
 	gatewayMissedPings   = 3
@@ -71,6 +70,10 @@ func getEnv(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func errResp(w http.ResponseWriter, err error) {
+	respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 }
 
 // ── HMAC — verifying inbound tokens (slave role) ──────────────────────────
@@ -139,7 +142,7 @@ func createDBHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	decode(r, &req)
 	if err := storage.CreateDB(req.DB); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		errResp(w, err)
 		return
 	}
 	respond(w, http.StatusCreated, map[string]string{"status": "ok"})
@@ -154,7 +157,7 @@ func dropDBHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := storage.DropDB(req.DB); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		errResp(w, err)
 		return
 	}
 	storage.MarkDBDropped(req.DB)
@@ -169,7 +172,7 @@ func createTableHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	decode(r, &req)
 	if err := storage.CreateTable(req.DB, req.Table, req.Attributes); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		errResp(w, err)
 		return
 	}
 	respond(w, http.StatusCreated, map[string]string{"status": "ok"})
@@ -185,7 +188,7 @@ func dropTableHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := storage.DropTable(req.DB, req.Table); err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		errResp(w, err)
 		return
 	}
 	respond(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -204,7 +207,7 @@ func insertHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := storage.InsertRecord(req.DB, req.Table, req.Record)
 	if err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		errResp(w, err)
 		return
 	}
 	respond(w, http.StatusCreated, map[string]any{"message": "record inserted", "generated_id": id})
@@ -225,7 +228,7 @@ func selectHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	records, err := storage.SelectRecords(db, table, where)
 	if err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		errResp(w, err)
 		return
 	}
 	if records == nil {
@@ -247,7 +250,7 @@ func updateHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := storage.UpdateRecords(req.DB, req.Table, req.Where, req.Set)
 	if err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		errResp(w, err)
 		return
 	}
 	respond(w, http.StatusOK, map[string]any{"message": "update complete", "records_updated": n})
@@ -265,7 +268,7 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := storage.DeleteRecords(req.DB, req.Table, req.Where)
 	if err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		errResp(w, err)
 		return
 	}
 	respond(w, http.StatusOK, map[string]any{"message": "delete complete", "records_deleted": n})
@@ -280,7 +283,7 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	all, err := storage.SelectRecords(db, table, nil)
 	if err != nil {
-		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		errResp(w, err)
 		return
 	}
 	termLower := strings.ToLower(term)
@@ -672,20 +675,27 @@ type fwdResult struct {
 	Err        error
 }
 
-func fwdJSON(sl *promoSlave, method, endpoint string, payload any) fwdResult {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fwdResult{SlaveID: sl.ID, Err: err}
+// fwd sends a request to sl; payload=nil produces a GET with no body.
+func fwd(sl *promoSlave, method, path string, payload any) fwdResult {
+	var bodyReader io.Reader
+	if payload != nil {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return fwdResult{SlaveID: sl.ID, Err: err}
+		}
+		bodyReader = bytes.NewReader(b)
 	}
 	token, err := newToken()
 	if err != nil {
 		return fwdResult{SlaveID: sl.ID, Err: err}
 	}
-	req, err := http.NewRequest(method, sl.URL+endpoint, bytes.NewReader(body))
+	req, err := http.NewRequest(method, sl.URL+path, bodyReader)
 	if err != nil {
 		return fwdResult{SlaveID: sl.ID, Err: err}
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("X-Gateway-Token", token)
 	resp, err := promoHTTPClient.Do(req)
 	if err != nil {
@@ -702,28 +712,6 @@ func fwdJSON(sl *promoSlave, method, endpoint string, payload any) fwdResult {
 	return fwdResult{SlaveID: sl.ID, StatusCode: resp.StatusCode, Body: rb}
 }
 
-func fwdGET(sl *promoSlave, path string) fwdResult {
-	token, err := newToken()
-	if err != nil {
-		return fwdResult{SlaveID: sl.ID, Err: err}
-	}
-	req, err := http.NewRequest("GET", sl.URL+path, nil)
-	if err != nil {
-		return fwdResult{SlaveID: sl.ID, Err: err}
-	}
-	req.Header.Set("X-Gateway-Token", token)
-	resp, err := promoHTTPClient.Do(req)
-	if err != nil {
-		sl.SetAlive(false)
-		return fwdResult{SlaveID: sl.ID, Err: err}
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
-	var rb map[string]any
-	json.Unmarshal(raw, &rb)
-	return fwdResult{SlaveID: sl.ID, StatusCode: resp.StatusCode, Body: rb}
-}
-
 func broadcastAll(method, endpoint string, payload any) []fwdResult {
 	alive := alivePromoSlaves()
 	if len(alive) == 0 {
@@ -731,7 +719,7 @@ func broadcastAll(method, endpoint string, payload any) []fwdResult {
 	}
 	ch := make(chan fwdResult, len(alive))
 	for _, s := range alive {
-		go func(sl *promoSlave) { ch <- fwdJSON(sl, method, endpoint, payload) }(s)
+		go func(sl *promoSlave) { ch <- fwd(sl, method, endpoint, payload) }(s)
 	}
 	results := make([]fwdResult, 0, len(alive))
 	for range alive {
@@ -739,6 +727,68 @@ func broadcastAll(method, endpoint string, payload any) []fwdResult {
 	}
 	close(ch)
 	return results
+}
+
+// promoBroadcast broadcasts and writes an error response on any failure.
+func promoBroadcast(w http.ResponseWriter, method, endpoint string, payload any) bool {
+	results := broadcastAll(method, endpoint, payload)
+	if len(results) == 0 {
+		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
+		return false
+	}
+	for _, r := range results {
+		if r.Err != nil || r.StatusCode >= 400 {
+			respond(w, http.StatusInternalServerError, map[string]string{"error": "failed on " + r.SlaveID})
+			return false
+		}
+	}
+	return true
+}
+
+// promoFanOut fans-out a GET to all alive slaves via goroutines+channels.
+func promoFanOut(alive []*promoSlave, path string) []any {
+	ch := make(chan []any, len(alive))
+	for _, s := range alive {
+		go func(sl *promoSlave) {
+			res := fwd(sl, "GET", path, nil)
+			if res.Err != nil || res.StatusCode >= 400 {
+				ch <- nil
+				return
+			}
+			rows, _ := res.Body["records"].([]any)
+			ch <- rows
+		}(s)
+	}
+	merged := make([]any, 0)
+	for range alive {
+		if rows := <-ch; rows != nil {
+			merged = append(merged, rows...)
+		}
+	}
+	close(ch)
+	return merged
+}
+
+// promoWriteCount fans-out a write to all targets via goroutines+channels and sums countKey.
+func promoWriteCount(targets []*promoSlave, method, endpoint string, payload any, countKey string) int {
+	ch := make(chan int, len(targets))
+	for _, t := range targets {
+		go func(sl *promoSlave) {
+			n := 0
+			if res := fwd(sl, method, endpoint, payload); res.Err == nil {
+				if v, ok := res.Body[countKey].(float64); ok {
+					n = int(v)
+				}
+			}
+			ch <- n
+		}(t)
+	}
+	total := 0
+	for range targets {
+		total += <-ch
+	}
+	close(ch)
+	return total
 }
 
 func routeWriteTargets(db, table string, where map[string]any) []*promoSlave {
@@ -797,16 +847,8 @@ func buildGatewayMux() *http.ServeMux {
 			respond(w, http.StatusBadRequest, map[string]string{"error": "'db' is required"})
 			return
 		}
-		results := broadcastAll("POST", "/shard/db/create", map[string]any{"db": req.DB})
-		if len(results) == 0 {
-			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
+		if !promoBroadcast(w, "POST", "/shard/db/create", map[string]any{"db": req.DB}) {
 			return
-		}
-		for _, res := range results {
-			if res.Err != nil || res.StatusCode >= 400 {
-				respond(w, http.StatusInternalServerError, map[string]string{"error": "failed on " + res.SlaveID})
-				return
-			}
 		}
 		promoDroppedMu.Lock()
 		delete(promoDroppedDBs, req.DB)
@@ -858,12 +900,8 @@ func buildGatewayMux() *http.ServeMux {
 		promoMu.Lock()
 		promoTables[req.DB+"."+req.Table] = meta
 		promoMu.Unlock()
-		results := broadcastAll("POST", "/shard/table/create", map[string]any{"db": req.DB, "table": req.Table, "attributes": req.Attributes})
-		for _, res := range results {
-			if res.Err != nil || res.StatusCode >= 400 {
-				respond(w, http.StatusInternalServerError, map[string]string{"error": "failed on " + res.SlaveID})
-				return
-			}
+		if !promoBroadcast(w, "POST", "/shard/table/create", map[string]any{"db": req.DB, "table": req.Table, "attributes": req.Attributes}) {
+			return
 		}
 		atomic.AddInt64(&promoVersion, 1)
 		savePromotedMetadata()
@@ -911,7 +949,7 @@ func buildGatewayMux() *http.ServeMux {
 			respond(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 			return
 		}
-		res := fwdJSON(target, "POST", "/shard/query/insert", map[string]any{
+		res := fwd(target, "POST", "/shard/query/insert", map[string]any{
 			"db": req.DB, "table": req.Table, "record": req.Record, "shard_idx": shardIdx,
 		})
 		if res.Err != nil {
@@ -935,8 +973,7 @@ func buildGatewayMux() *http.ServeMux {
 			promoMu.RUnlock()
 			if meta != nil {
 				if t := slaveForID(meta, idVal); t != nil && t.IsAlive() {
-					res := fwdGET(t, "/shard/query/select?"+q.Encode())
-					if res.Err == nil {
+					if res := fwd(t, "GET", "/shard/query/select?"+q.Encode(), nil); res.Err == nil {
 						respond(w, res.StatusCode, res.Body)
 						return
 					}
@@ -948,26 +985,7 @@ func buildGatewayMux() *http.ServeMux {
 			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
 			return
 		}
-		ch := make(chan []any, len(alive))
-		path := "/shard/query/select?" + q.Encode()
-		for _, s := range alive {
-			go func(sl *promoSlave) {
-				res := fwdGET(sl, path)
-				if res.Err != nil {
-					ch <- nil
-					return
-				}
-				rows, _ := res.Body["records"].([]any)
-				ch <- rows
-			}(s)
-		}
-		merged := make([]any, 0)
-		for range alive {
-			if rows := <-ch; rows != nil {
-				merged = append(merged, rows...)
-			}
-		}
-		close(ch)
+		merged := promoFanOut(alive, "/shard/query/select?"+q.Encode())
 		respond(w, http.StatusOK, map[string]any{"count": len(merged), "records": merged})
 	}))
 
@@ -987,17 +1005,9 @@ func buildGatewayMux() *http.ServeMux {
 			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
 			return
 		}
-		payload := map[string]any{"db": req.DB, "table": req.Table, "where": req.Where, "set": req.Set}
-		total := 0
-		for _, t := range targets {
-			res := fwdJSON(t, "PUT", "/shard/query/update", payload)
-			if res.Err == nil {
-				if n, ok := res.Body["records_updated"].(float64); ok {
-					total += int(n)
-				}
-			}
-		}
-		respond(w, http.StatusOK, map[string]any{"message": "update complete", "records_updated": total})
+		n := promoWriteCount(targets, "PUT", "/shard/query/update",
+			map[string]any{"db": req.DB, "table": req.Table, "where": req.Where, "set": req.Set}, "records_updated")
+		respond(w, http.StatusOK, map[string]any{"message": "update complete", "records_updated": n})
 	}))
 
 	mux.HandleFunc("/query/delete", gwMethod("DELETE", func(w http.ResponseWriter, r *http.Request) {
@@ -1015,17 +1025,9 @@ func buildGatewayMux() *http.ServeMux {
 			respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
 			return
 		}
-		payload := map[string]any{"db": req.DB, "table": req.Table, "where": req.Where}
-		total := 0
-		for _, t := range targets {
-			res := fwdJSON(t, "DELETE", "/shard/query/delete", payload)
-			if res.Err == nil {
-				if n, ok := res.Body["records_deleted"].(float64); ok {
-					total += int(n)
-				}
-			}
-		}
-		respond(w, http.StatusOK, map[string]any{"message": "delete complete", "records_deleted": total})
+		n := promoWriteCount(targets, "DELETE", "/shard/query/delete",
+			map[string]any{"db": req.DB, "table": req.Table, "where": req.Where}, "records_deleted")
+		respond(w, http.StatusOK, map[string]any{"message": "delete complete", "records_deleted": n})
 	}))
 
 	mux.HandleFunc("/query/search", gwMethod("GET", func(w http.ResponseWriter, r *http.Request) {
@@ -1036,26 +1038,8 @@ func buildGatewayMux() *http.ServeMux {
 			return
 		}
 		alive := alivePromoSlaves()
-		ch := make(chan []any, len(alive))
 		path := fmt.Sprintf("/shard/query/search?db=%s&table=%s&q=%s", db, table, url.QueryEscape(term))
-		for _, s := range alive {
-			go func(sl *promoSlave) {
-				res := fwdGET(sl, path)
-				if res.Err != nil || res.StatusCode >= 400 {
-					ch <- nil
-					return
-				}
-				rows, _ := res.Body["records"].([]any)
-				ch <- rows
-			}(s)
-		}
-		merged := make([]any, 0)
-		for range alive {
-			if rows := <-ch; rows != nil {
-				merged = append(merged, rows...)
-			}
-		}
-		close(ch)
+		merged := promoFanOut(alive, path)
 		respond(w, http.StatusOK, map[string]any{"search_term": term, "count": len(merged), "records": merged})
 	}))
 
