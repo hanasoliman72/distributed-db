@@ -200,6 +200,10 @@ func dropDBHandler(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// Mark immediately so the storage layer redirects all subsequent
+	// reads/writes to the replica schema without waiting for the async
+	// metadata-sync message from the gateway.
+	storage.MarkDBDropped(req.DB)
 	respond(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -372,11 +376,21 @@ func watchGateway() {
 // ── Promoted-gateway state ────────────────────────────────────────────────
 
 var (
-	promoMu     sync.RWMutex
-	promoSlaves []*promoSlave
-	promoTables = map[string]*promoTableMeta{}
-	promoRRMu   sync.Mutex
-	promoRRCtr  int
+	promoMu      sync.RWMutex
+	promoSlaves  []*promoSlave
+	promoTables  = map[string]*promoTableMeta{}
+	promoRRMu    sync.Mutex
+	promoRRCtr   int
+
+	// promoVersion is a monotonic counter bumped on every DDL the promoted
+	// gateway handles. It is written into savePromotedMetadata so that when
+	// the original gateway calls /gateway/sync it sees a version strictly
+	// greater than what it had before going down.
+	promoVersion int64
+
+	// promoDroppedDBs tracks databases dropped while this slave acts as gateway.
+	promoDroppedMu  sync.RWMutex
+	promoDroppedDBs = map[string]struct{}{}
 )
 
 type promoSlave struct {
@@ -477,33 +491,55 @@ func demote() {
 	go watchGateway()
 }
 
+// snapshotOnDisk is the canonical JSON format shared with the gateway.
+// It MUST match gateway/metadata.Snapshot field-for-field.
+type snapshotOnDisk struct {
+	Version    int64  `json:"version"`
+	Slaves     []struct {
+		ID  string `json:"id"`
+		URL string `json:"url"`
+	} `json:"slaves"`
+	Tables     []*promoTableMeta `json:"tables"`
+	DroppedDBs []string          `json:"dropped_dbs,omitempty"`
+}
+
 func loadPromotedMetadata() error {
 	data, err := readMetadataFile()
 	if err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("[slave-go] promote: %s not found, bootstrapping self-only gateway metadata", metadataFile)
+			log.Printf("[slave-go] promote: %s not found, bootstrapping self-only", metadataFile)
 			promoSlaves = []*promoSlave{{ID: slaveID, URL: "http://127.0.0.1" + slavePort, alive: true}}
 			promoTables = map[string]*promoTableMeta{}
+			atomic.StoreInt64(&promoVersion, 0)
 			return nil
 		}
 		return err
 	}
-	var pm struct {
-		Slaves []struct {
-			ID  string `json:"id"`
-			URL string `json:"url"`
-		} `json:"slaves"`
-		Tables []*promoTableMeta `json:"tables"`
-	}
-	if err := json.Unmarshal(data, &pm); err != nil {
+	var snap snapshotOnDisk
+	if err := json.Unmarshal(data, &snap); err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
+
+	// Restore version counter so future DDL bumps produce higher numbers.
+	atomic.StoreInt64(&promoVersion, snap.Version)
+
+	// Restore dropped-DB set so the storage layer skips primary attempts.
+	// ApplyDroppedDBs REPLACES the entire set (not additive) so stale
+	// entries from a previous session do not survive a restart.
+	promoDroppedMu.Lock()
+	promoDroppedDBs = make(map[string]struct{}, len(snap.DroppedDBs))
+	for _, d := range snap.DroppedDBs {
+		promoDroppedDBs[d] = struct{}{}
+	}
+	promoDroppedMu.Unlock()
+	storage.ApplyDroppedDBs(snap.DroppedDBs)
+
 	promoMu.Lock()
 	defer promoMu.Unlock()
-	promoSlaves = make([]*promoSlave, 0, len(pm.Slaves)+1)
+	promoSlaves = make([]*promoSlave, 0, len(snap.Slaves)+1)
 	selfURL := "http://127.0.0.1" + slavePort
 	selfAdded := false
-	for _, s := range pm.Slaves {
+	for _, s := range snap.Slaves {
 		if s.ID == slaveID {
 			promoSlaves = append(promoSlaves, &promoSlave{ID: s.ID, URL: selfURL, alive: true})
 			selfAdded = true
@@ -514,10 +550,12 @@ func loadPromotedMetadata() error {
 	if !selfAdded {
 		promoSlaves = append([]*promoSlave{{ID: slaveID, URL: selfURL, alive: true}}, promoSlaves...)
 	}
-	promoTables = make(map[string]*promoTableMeta, len(pm.Tables))
-	for _, t := range pm.Tables {
+	promoTables = make(map[string]*promoTableMeta, len(snap.Tables))
+	for _, t := range snap.Tables {
 		promoTables[t.DB+"."+t.Table] = t
 	}
+	log.Printf("[slave-go] promote: loaded version=%d, slaves=%d, tables=%d, dropped_dbs=%v",
+		snap.Version, len(snap.Slaves), len(snap.Tables), snap.DroppedDBs)
 	return nil
 }
 
@@ -545,17 +583,58 @@ func readMetadataFile() ([]byte, error) {
 
 func savePromotedMetadata() {
 	promoMu.RLock()
-	slaves := make([]map[string]string, len(promoSlaves))
+	slaves := make([]struct {
+		ID  string `json:"id"`
+		URL string `json:"url"`
+	}, len(promoSlaves))
 	for i, s := range promoSlaves {
-		slaves[i] = map[string]string{"id": s.ID, "url": s.URL}
+		slaves[i].ID = s.ID
+		slaves[i].URL = s.URL
 	}
 	tables := make([]*promoTableMeta, 0, len(promoTables))
 	for _, t := range promoTables {
 		tables = append(tables, t)
 	}
 	promoMu.RUnlock()
-	data, _ := json.MarshalIndent(map[string]any{"slaves": slaves, "tables": tables}, "", "  ")
-	os.WriteFile(metadataFile, data, 0644)
+
+	promoDroppedMu.RLock()
+	droppedList := make([]string, 0, len(promoDroppedDBs))
+	for d := range promoDroppedDBs {
+		droppedList = append(droppedList, d)
+	}
+	promoDroppedMu.RUnlock()
+
+	// Write a full Snapshot that matches gateway/metadata.Snapshot exactly.
+	// The version field is the key fix — without it the gateway rejects the
+	// sync payload as stale (version=0 <= current).
+	snap := snapshotOnDisk{
+		Version:    atomic.LoadInt64(&promoVersion),
+		DroppedDBs: droppedList,
+	}
+	// Assign via reflection-friendly intermediate (avoids anonymous-struct copy issues).
+	for _, s := range slaves {
+		snap.Slaves = append(snap.Slaves, struct {
+			ID  string `json:"id"`
+			URL string `json:"url"`
+		}{ID: s.ID, URL: s.URL})
+	}
+	snap.Tables = tables
+
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		log.Printf("[slave-go] savePromotedMetadata: marshal error: %v", err)
+		return
+	}
+	tmp := metadataFile + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		log.Printf("[slave-go] savePromotedMetadata: write error: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, metadataFile); err != nil {
+		log.Printf("[slave-go] savePromotedMetadata: rename error: %v", err)
+		return
+	}
+	log.Printf("[slave-go] metadata saved (version=%d)", atomic.LoadInt64(&promoVersion))
 }
 
 // syncMetadataToGateway posts the promoted node's metadata.json to the original
@@ -813,6 +892,14 @@ func buildGatewayMux() *http.ServeMux {
 				return
 			}
 		}
+		// Clear dropped-DB state so future inserts route to the primary again.
+		// This must happen on both the promo registry AND the local storage layer
+		// (which handles inserts on this node itself).
+		promoDroppedMu.Lock()
+		delete(promoDroppedDBs, req.DB)
+		promoDroppedMu.Unlock()
+		storage.ClearDroppedDB(req.DB)
+		atomic.AddInt64(&promoVersion, 1)
 		savePromotedMetadata()
 		respond(w, http.StatusCreated, map[string]string{"message": "database '" + req.DB + "' created"})
 	}))
@@ -825,16 +912,16 @@ func buildGatewayMux() *http.ServeMux {
 			respond(w, http.StatusBadRequest, map[string]string{"error": "'db' is required"})
 			return
 		}
-		promoMu.Lock()
-		for k, t := range promoTables {
-			if t.DB == req.DB {
-				delete(promoTables, k)
-			}
-		}
-		promoMu.Unlock()
+		// Record the drop in the promoted gateway's dropped set and storage layer.
+		promoDroppedMu.Lock()
+		promoDroppedDBs[req.DB] = struct{}{}
+		promoDroppedMu.Unlock()
+		storage.MarkDBDropped(req.DB)
+		// Bump version so the restored gateway adopts this state.
+		atomic.AddInt64(&promoVersion, 1)
 		broadcastAll("DELETE", "/shard/db/drop", map[string]any{"db": req.DB})
 		savePromotedMetadata()
-		respond(w, http.StatusOK, map[string]string{"message": "database '" + req.DB + "' dropped"})
+		respond(w, http.StatusOK, map[string]string{"message": "database '" + req.DB + "' dropped; replica-only mode active"})
 	}))
 
 	mux.HandleFunc("/table/create", gwMethod("POST", func(w http.ResponseWriter, r *http.Request) {
@@ -867,6 +954,7 @@ func buildGatewayMux() *http.ServeMux {
 				return
 			}
 		}
+		atomic.AddInt64(&promoVersion, 1)
 		savePromotedMetadata()
 		respond(w, http.StatusCreated, map[string]any{"message": "table '" + req.Table + "' created", "shards": ids})
 	}))
@@ -884,6 +972,7 @@ func buildGatewayMux() *http.ServeMux {
 		delete(promoTables, req.DB+"."+req.Table)
 		promoMu.Unlock()
 		broadcastAll("DELETE", "/shard/table/drop", map[string]any{"db": req.DB, "table": req.Table})
+		atomic.AddInt64(&promoVersion, 1)
 		savePromotedMetadata()
 		respond(w, http.StatusOK, map[string]string{"message": "table '" + req.Table + "' dropped"})
 	}))
@@ -1087,6 +1176,40 @@ func main() {
 	mux.HandleFunc("/shard/query/update", authMiddleware(updateHandler))
 	mux.HandleFunc("/shard/query/delete", authMiddleware(deleteHandler))
 	mux.HandleFunc("/shard/query/search", authMiddleware(searchHandler))
+
+	// /shard/metadata/sync — gateway POSTs the full Snapshot here after every
+	// DDL change. This was the missing endpoint that caused all replication
+	// calls to silently fail with 404. No auth required (gateway signs with
+	// X-Gateway-Token but this path is internal infra, not data).
+	mux.HandleFunc("/shard/metadata/sync", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read error", http.StatusBadRequest)
+			return
+		}
+		var snap snapshotOnDisk
+		if err := json.Unmarshal(data, &snap); err != nil {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+		// Persist to disk atomically so it survives a restart.
+		tmp := metadataFile + ".tmp"
+		if err := os.WriteFile(tmp, data, 0644); err == nil {
+			os.Rename(tmp, metadataFile)
+		}
+		// Authoritatively REPLACE the entire dropped-DB set.
+		// Using ApplyDroppedDBs (not a loop of MarkDBDropped) means stale entries
+		// are removed when the gateway sends a snapshot with a shorter list
+		// (e.g. after /db/create clears a DB from DroppedDBs).
+		storage.ApplyDroppedDBs(snap.DroppedDBs)
+		log.Printf("[slave-go] /shard/metadata/sync: version=%d, tables=%d, dropped=%v",
+			snap.Version, len(snap.Tables), snap.DroppedDBs)
+		respond(w, http.StatusOK, map[string]string{"status": "synced"})
+	})
 
 	go watchGateway()
 

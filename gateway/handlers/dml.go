@@ -17,7 +17,6 @@ import (
 	"gateway/metadata"
 	"gateway/shard"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"time"
@@ -29,7 +28,8 @@ var mapReducerURL = "http://127.0.0.1:8090"
 
 var mrClient = &http.Client{Timeout: 10 * time.Second}
 
-// callMapReducer sends shard results to the MapReducer and returns merged records.
+// callMapReducer sends per-shard row buckets to the MapReducer and returns
+// the merged, optionally sorted/limited result set.
 // Falls back to simple concatenation if the MapReducer is unreachable.
 func callMapReducer(shards [][]any, orderBy, order string, limit int) ([]any, error) {
 	payload := map[string]any{
@@ -42,15 +42,14 @@ func callMapReducer(shards [][]any, orderBy, order string, limit int) ([]any, er
 
 	resp, err := mrClient.Post(mapReducerURL+"/reduce", "application/json", bytes.NewReader(body))
 	if err != nil {
-		log.Printf("[dml] MapReducer unreachable (%v) — falling back to local merge", err)
-		// Fallback: simple flatten
-		merged := make([]any, 0)
-		for _, rows := range shards {
-			merged = append(merged, rows...)
-		}
-		return merged, nil
+		return nil, fmt.Errorf("mapReducer unreachable: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("mapReducer error: status=%d body=%s", resp.StatusCode, string(raw))
+	}
 
 	raw, _ := io.ReadAll(resp.Body)
 	var result struct {
@@ -62,6 +61,16 @@ func callMapReducer(shards [][]any, orderBy, order string, limit int) ([]any, er
 	return result.Records, nil
 }
 
+// toAnySlice safely casts []map[string]any (returned by individual shards) to
+// []any so it fits the [][]any expected by callMapReducer.
+func toAnySlice(rows []map[string]any) []any {
+	out := make([]any, len(rows))
+	for i, r := range rows {
+		out[i] = r
+	}
+	return out
+}
+
 // ── /query/insert  POST ────────────────────────────────────────────────────
 
 func Insert(w http.ResponseWriter, r *http.Request) {
@@ -71,13 +80,17 @@ func Insert(w http.ResponseWriter, r *http.Request) {
 		Record map[string]any `json:"record"`
 	}
 	if err := decode(r, &req); err != nil || req.DB == "" || req.Table == "" || req.Record == nil {
-		respond(w, http.StatusBadRequest, map[string]string{"error": "'db', 'table', and 'record' are required"})
+		respond(w, http.StatusBadRequest, map[string]string{
+			"error": "'db', 'table', and 'record' are required",
+		})
 		return
 	}
 
 	meta := metadata.GetTableMeta(req.DB, req.Table)
 	if meta == nil {
-		respond(w, http.StatusNotFound, map[string]string{"error": "table not found in metadata; create it first"})
+		respond(w, http.StatusNotFound, map[string]string{
+			"error": "table not found in metadata; create it first",
+		})
 		return
 	}
 
@@ -109,11 +122,13 @@ func Select(w http.ResponseWriter, r *http.Request) {
 	db := q.Get("db")
 	table := q.Get("table")
 	if db == "" || table == "" {
-		respond(w, http.StatusBadRequest, map[string]string{"error": "'db' and 'table' are required"})
+		respond(w, http.StatusBadRequest, map[string]string{
+			"error": "'db' and 'table' are required",
+		})
 		return
 	}
 
-	// If a specific id is requested, route to the owning shard.
+	// Fast path: if a specific id is given, route to its owning shard only.
 	if idVal := q.Get("id"); idVal != "" {
 		meta := metadata.GetTableMeta(db, table)
 		if meta != nil {
@@ -124,12 +139,12 @@ func Select(w http.ResponseWriter, r *http.Request) {
 					respond(w, res.StatusCode, res.Body)
 					return
 				}
-				// fall through to fan-out on error
+				// Fall through to full fan-out on error.
 			}
 		}
 	}
 
-	// Fan-out to all shards, collect per-shard row lists, then merge via MapReducer.
+	// Fan-out: query every alive shard in parallel.
 	alive := metadata.AliveSlaves()
 	if len(alive) == 0 {
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
@@ -150,6 +165,8 @@ func Select(w http.ResponseWriter, r *http.Request) {
 				ch <- shardResult{err: res.Err}
 				return
 			}
+			// The slave returns {"count":N,"records":[…]}
+			// records can be []any (JSON array of objects).
 			rows, _ := res.Body["records"].([]any)
 			ch <- shardResult{rows: rows}
 		}(s)
@@ -158,13 +175,13 @@ func Select(w http.ResponseWriter, r *http.Request) {
 	shardBuckets := make([][]any, 0, len(alive))
 	for range alive {
 		sr := <-ch
-		if sr.err == nil {
+		if sr.err == nil && len(sr.rows) > 0 {
 			shardBuckets = append(shardBuckets, sr.rows)
 		}
 	}
 	close(ch)
 
-	// Optional query params forwarded to MapReducer.
+	// Merge via MapReducer (handles sort + limit).
 	orderBy := q.Get("order_by")
 	order := q.Get("order")
 	limit := 0
@@ -189,7 +206,9 @@ func Update(w http.ResponseWriter, r *http.Request) {
 		Set   map[string]any `json:"set"`
 	}
 	if err := decode(r, &req); err != nil || req.DB == "" || req.Table == "" || req.Set == nil {
-		respond(w, http.StatusBadRequest, map[string]string{"error": "'db', 'table', 'where', and 'set' are required"})
+		respond(w, http.StatusBadRequest, map[string]string{
+			"error": "'db', 'table', 'where', and 'set' are required",
+		})
 		return
 	}
 
@@ -199,7 +218,12 @@ func Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload := map[string]any{"db": req.DB, "table": req.Table, "where": req.Where, "set": req.Set}
+	payload := map[string]any{
+		"db":    req.DB,
+		"table": req.Table,
+		"where": req.Where,
+		"set":   req.Set,
+	}
 	totalAffected := 0
 	for _, target := range targets {
 		res := shard.Forward(target, "PUT", "/shard/query/update", payload)
@@ -209,7 +233,10 @@ func Update(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	respond(w, http.StatusOK, map[string]any{"message": "update complete", "records_updated": totalAffected})
+	respond(w, http.StatusOK, map[string]any{
+		"message":         "update complete",
+		"records_updated": totalAffected,
+	})
 }
 
 // ── /query/delete  DELETE ──────────────────────────────────────────────────
@@ -221,7 +248,9 @@ func Delete(w http.ResponseWriter, r *http.Request) {
 		Where map[string]any `json:"where"`
 	}
 	if err := decode(r, &req); err != nil || req.DB == "" || req.Table == "" {
-		respond(w, http.StatusBadRequest, map[string]string{"error": "'db', 'table', and 'where' are required"})
+		respond(w, http.StatusBadRequest, map[string]string{
+			"error": "'db', 'table', and 'where' are required",
+		})
 		return
 	}
 
@@ -231,7 +260,11 @@ func Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload := map[string]any{"db": req.DB, "table": req.Table, "where": req.Where}
+	payload := map[string]any{
+		"db":    req.DB,
+		"table": req.Table,
+		"where": req.Where,
+	}
 	totalAffected := 0
 	for _, target := range targets {
 		res := shard.Forward(target, "DELETE", "/shard/query/delete", payload)
@@ -241,7 +274,10 @@ func Delete(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	respond(w, http.StatusOK, map[string]any{"message": "delete complete", "records_deleted": totalAffected})
+	respond(w, http.StatusOK, map[string]any{
+		"message":         "delete complete",
+		"records_deleted": totalAffected,
+	})
 }
 
 // ── /query/search  GET ─────────────────────────────────────────────────────
@@ -252,13 +288,21 @@ func Search(w http.ResponseWriter, r *http.Request) {
 	table := q.Get("table")
 	term := q.Get("q")
 	if db == "" || table == "" || term == "" {
-		respond(w, http.StatusBadRequest, map[string]string{"error": "'db', 'table', and 'q' are required"})
+		respond(w, http.StatusBadRequest, map[string]string{
+			"error": "'db', 'table', and 'q' are required",
+		})
 		return
 	}
 
 	alive := metadata.AliveSlaves()
+	if len(alive) == 0 {
+		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
+		return
+	}
+
 	ch := make(chan []any, len(alive))
-	path := fmt.Sprintf("/shard/query/search?db=%s&table=%s&q=%s", db, table, url.QueryEscape(term))
+	path := fmt.Sprintf("/shard/query/search?db=%s&table=%s&q=%s",
+		url.QueryEscape(db), url.QueryEscape(table), url.QueryEscape(term))
 
 	for _, s := range alive {
 		go func(sl *metadata.Slave) {
@@ -280,20 +324,23 @@ func Search(w http.ResponseWriter, r *http.Request) {
 	}
 	close(ch)
 
-	// No ordering needed for search, but pass through any caller preferences.
 	merged, err := callMapReducer(shardBuckets, "", "", 0)
 	if err != nil {
 		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 
-	respond(w, http.StatusOK, map[string]any{"search_term": term, "count": len(merged), "records": merged})
+	respond(w, http.StatusOK, map[string]any{
+		"search_term": term,
+		"count":       len(merged),
+		"records":     merged,
+	})
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
 // routeWriteTargets returns the slave(s) that should receive a write.
-// If "id" is in the where clause, route to the owning shard only.
+// If "id" is present in the where clause, route only to the owning shard.
 // Otherwise broadcast to all alive slaves.
 func routeWriteTargets(db, table string, where map[string]any) []*metadata.Slave {
 	if idVal, ok := where["id"]; ok {
