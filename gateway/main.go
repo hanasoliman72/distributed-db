@@ -18,32 +18,27 @@ import (
 	"gateway/metadata"
 	"log"
 	"net/http"
-	"os"
 	"time"
 )
 
-const defaultPort = ":8080"
+const (
+	defaultPort   = ":8080"
+	gatewaySecret = "Hana-1234"
+	slaveAURL     = "http://127.0.0.1:8081"
+	slaveBURL     = "http://127.0.0.1:8082"
+	slaveCURL     = "http://127.0.0.1:8083"
+)
 
 func main() {
 	// ── 1. Configure auth secret ────────────────────────────────────────
-	secret := os.Getenv("GATEWAY_SECRET")
-	if secret != "" {
-		auth.SetSecret(secret)
-		log.Println("[gateway] HMAC secret loaded from GATEWAY_SECRET env var")
-	} else {
-		log.Println("[gateway] WARNING: using default HMAC secret; set GATEWAY_SECRET in production")
-	}
+	auth.SetSecret(gatewaySecret)
+	log.Println("[gateway] HMAC secret loaded from constant gatewaySecret")
 
 	// ── 2. Register slaves ───────────────────────────────────────────────
-	// Read slave addresses from env vars or use defaults.
-	slaveA := envOr("SLAVE_A_URL", "http://127.0.0.1:8081")
-	slaveB := envOr("SLAVE_B_URL", "http://127.0.0.1:8082")
-	slaveC := envOr("SLAVE_C_URL", "http://127.0.0.1:8083")
-
-	metadata.RegisterSlave("slave-a", slaveA)
-	metadata.RegisterSlave("slave-b", slaveB)
-	metadata.RegisterSlave("slave-c", slaveC)
-	log.Printf("[gateway] slaves: %s  %s  %s", slaveA, slaveB, slaveC)
+	metadata.RegisterSlave("slave-a", slaveAURL)
+	metadata.RegisterSlave("slave-b", slaveBURL)
+	metadata.RegisterSlave("slave-c", slaveCURL)
+	log.Printf("[gateway] slaves: %s  %s  %s", slaveAURL, slaveBURL, slaveCURL)
 
 	// ── 3. Start health checker ──────────────────────────────────────────
 	metadata.StartHealthChecker(10 * time.Second)
@@ -86,9 +81,8 @@ func main() {
 	})
 
 	// ── 5. Start HTTP server ─────────────────────────────────────────────
-	port := envOr("GATEWAY_PORT", defaultPort)
-	log.Printf("[gateway] listening on %s", port)
-	if err := http.ListenAndServe(port, mux); err != nil {
+	log.Printf("[gateway] listening on %s", defaultPort)
+	if err := http.ListenAndServe(defaultPort, mux); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -101,11 +95,4 @@ func method(m string, h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

@@ -181,7 +181,10 @@ func StartHealthChecker(interval time.Duration) {
 				go func(sl *Slave) {
 					cl := &http.Client{Timeout: 3 * time.Second}
 					resp, err := cl.Get(sl.URL + "/health")
-					if err != nil || resp.StatusCode != http.StatusOK {
+					if err != nil || resp == nil || resp.StatusCode != http.StatusOK {
+						if resp != nil {
+							resp.Body.Close()
+						}
 						if sl.IsAlive() {
 							log.Printf("[metadata] slave %s went OFFLINE", sl.ID)
 						}

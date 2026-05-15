@@ -2,7 +2,7 @@ package auth
 
 // auth.go
 //
-// Generates and verifies short-lived HMAC-SHA256 tokens that the API Gateway
+// Generates and verifies HMAC-SHA256 tokens that the API Gateway
 // attaches to every request it forwards to a slave.
 //
 // Flow:
@@ -10,8 +10,6 @@ package auth
 //
 // Token format (pipe-delimited):
 //   <unix_timestamp>|<nonce>|<HMAC-SHA256(secret, timestamp|nonce)>
-//
-// The slave rejects tokens older than TokenTTL seconds.
 
 import (
 	"crypto/hmac"
@@ -25,9 +23,6 @@ import (
 )
 
 const (
-	// TokenTTL is how long (seconds) a gateway token stays valid.
-	TokenTTL = 30
-
 	// HeaderName is the HTTP header slaves check.
 	HeaderName = "X-Gateway-Token"
 )
@@ -39,7 +34,7 @@ var sharedSecret = []byte("ddb-gateway-secret-2025-change-me")
 // SetSecret overrides the default secret (call once at startup from main).
 func SetSecret(s string) { sharedSecret = []byte(s) }
 
-// NewToken mints a fresh token valid for TokenTTL seconds.
+// NewToken mints a fresh token with timestamp and HMAC signature.
 func NewToken() (string, error) {
 	ts := strconv.FormatInt(time.Now().Unix(), 10)
 
@@ -53,23 +48,14 @@ func NewToken() (string, error) {
 	return ts + "|" + nonce + "|" + sig, nil
 }
 
-// Verify returns nil if the token is well-formed, not expired, and has a valid
-// HMAC.  Returns a descriptive error otherwise.
+// Verify returns nil if the token is well-formed and has a valid HMAC.
+// Returns a descriptive error otherwise.
 func Verify(token string) error {
 	parts := strings.SplitN(token, "|", 3)
 	if len(parts) != 3 {
 		return fmt.Errorf("auth: malformed token")
 	}
 	ts, nonce, gotSig := parts[0], parts[1], parts[2]
-
-	issued, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil {
-		return fmt.Errorf("auth: bad timestamp")
-	}
-	age := time.Now().Unix() - issued
-	if age < 0 || age > TokenTTL {
-		return fmt.Errorf("auth: token expired (age=%ds)", age)
-	}
 
 	wantSig := sign(ts, nonce)
 	if !hmac.Equal([]byte(gotSig), []byte(wantSig)) {

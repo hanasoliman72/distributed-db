@@ -15,6 +15,7 @@ package storage
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"strings"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -46,6 +47,9 @@ func CreateDB(db string) error {
 }
 
 func DropDB(db string) error {
+	if !isValidIdentifier(db) {
+		return fmt.Errorf("invalid db name: %s", db)
+	}
 	for _, name := range []string{db, replicaName(db)} {
 		if _, err := DB.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", name)); err != nil {
 			return err
@@ -56,14 +60,18 @@ func DropDB(db string) error {
 
 // CreateTable creates the table in both primary and replica schemas.
 func CreateTable(db, table string, attributes []string) error {
+	if !isValidIdentifier(db) || !isValidIdentifier(table) {
+		return fmt.Errorf("invalid db or table name")
+	}
 	colDefs := []string{"`id` INT AUTO_INCREMENT PRIMARY KEY"}
 	for _, a := range attributes {
+		if !isValidIdentifier(a) {
+			return fmt.Errorf("invalid attribute name: %s", a)
+		}
 		if strings.ToLower(a) != "id" {
 			colDefs = append(colDefs, fmt.Sprintf("`%s` TEXT", a))
 		}
 	}
-	ddl := "(%s)"
-	_ = ddl
 	cols := strings.Join(colDefs, ", ")
 	for _, schema := range []string{db, replicaName(db)} {
 		q := fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s`.`%s` (%s)", schema, table, cols)
@@ -75,6 +83,9 @@ func CreateTable(db, table string, attributes []string) error {
 }
 
 func DropTable(db, table string) error {
+	if !isValidIdentifier(db) || !isValidIdentifier(table) {
+		return fmt.Errorf("invalid db or table name")
+	}
 	for _, schema := range []string{db, replicaName(db)} {
 		if _, err := DB.Exec(fmt.Sprintf("DROP TABLE IF EXISTS `%s`.`%s`", schema, table)); err != nil {
 			return err
@@ -100,7 +111,9 @@ func InsertRecord(db, table string, record map[string]any) (int64, error) {
 	record["id"] = id
 	colsR, phsR, valsR := buildInsertParts(record, false)
 	qR := fmt.Sprintf("INSERT IGNORE INTO `%s`.`%s` (%s) VALUES (%s)", replicaName(db), table, colsR, phsR)
-	DB.Exec(qR, valsR...) // best-effort replica write
+	if _, err := DB.Exec(qR, valsR...); err != nil {
+		log.Printf("[replica] warning: failed to mirror insert to %s.%s: %v", replicaName(db), table, err)
+	}
 
 	return id, nil
 }
@@ -147,7 +160,9 @@ func selectFrom(schema, table string, where map[string]any) ([]map[string]any, e
 // UpdateRecords updates primary and replica.
 func UpdateRecords(db, table string, where, set map[string]any) (int, error) {
 	n, err := updateIn(db, table, where, set)
-	updateIn(replicaName(db), table, where, set) // best-effort replica
+	if _, rerr := updateIn(replicaName(db), table, where, set); rerr != nil {
+		log.Printf("[replica] warning: failed to update replica %s.%s: %v", replicaName(db), table, rerr)
+	}
 	return n, err
 }
 
@@ -158,7 +173,7 @@ func updateIn(schema, table string, where, set map[string]any) (int, error) {
 	setClauses, args := []string{}, []any{}
 	for col, val := range set {
 		setClauses = append(setClauses, fmt.Sprintf("`%s` = ?", col))
-		args = append(args, fmt.Sprintf("%v", val))
+		args = append(args, val) // Pass actual type, not stringified
 	}
 	q := fmt.Sprintf("UPDATE `%s`.`%s` SET %s", schema, table, strings.Join(setClauses, ", "))
 	if len(where) > 0 {
@@ -177,7 +192,9 @@ func updateIn(schema, table string, where, set map[string]any) (int, error) {
 // DeleteRecords deletes from primary and replica.
 func DeleteRecords(db, table string, where map[string]any) (int, error) {
 	n, err := deleteFrom(db, table, where)
-	deleteFrom(replicaName(db), table, where) // best-effort replica
+	if _, derr := deleteFrom(replicaName(db), table, where); derr != nil {
+		log.Printf("[replica] warning: failed to delete from replica %s.%s: %v", replicaName(db), table, derr)
+	}
 	return n, err
 }
 
@@ -207,7 +224,7 @@ func buildInsertParts(record map[string]any, skipID bool) (cols, placeholders st
 		}
 		colList = append(colList, fmt.Sprintf("`%s`", col))
 		phList = append(phList, "?")
-		vals = append(vals, fmt.Sprintf("%v", val))
+		vals = append(vals, val) // Pass actual type, not stringified
 	}
 	return strings.Join(colList, ", "), strings.Join(phList, ", "), vals
 }
@@ -216,9 +233,23 @@ func buildWhere(where map[string]any) (string, []any) {
 	clauses, args := []string{}, []any{}
 	for col, val := range where {
 		clauses = append(clauses, fmt.Sprintf("`%s` = ?", col))
-		args = append(args, fmt.Sprintf("%v", val))
+		args = append(args, val) // Pass actual type, not stringified
 	}
 	return strings.Join(clauses, " AND "), args
+}
+
+// isValidIdentifier checks if a string is a valid SQL identifier
+func isValidIdentifier(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	// Allow alphanumeric, underscore, dash (simple validation)
+	for _, ch := range s {
+		if !((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_' || ch == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func scanRows(rows *sql.Rows) ([]map[string]any, error) {

@@ -41,9 +41,8 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "role": "mapreducer"})
 	})
 
-	port := envOr("MAPREDUCER_PORT", defaultPort)
-	log.Printf("[mapreducer] listening on %s", port)
-	log.Fatal(http.ListenAndServe(port, mux))
+	log.Printf("[mapreducer] listening on %s", defaultPort)
+	log.Fatal(http.ListenAndServe(defaultPort, mux))
 }
 
 // ── /reduce  POST ──────────────────────────────────────────────────────────

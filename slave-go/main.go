@@ -34,22 +34,48 @@ import (
 	"net/http"
 	"os"
 	"slave/storage"
-	"strconv"
 	"strings"
-	"time"
 )
 
 // ── Auth ──────────────────────────────────────────────────────────────────
 
-const tokenTTL = 30 // seconds
+const (
+	defaultSharedSecret = "Hana-1234"
+	defaultMysqlHost    = "127.0.0.1"
+	defaultMysqlPort    = "3306"
+	defaultMysqlUser    = "root"
+	defaultMysqlPass    = "root"
+	defaultSlavePort    = ":8081"
+)
 
-var sharedSecret = []byte("ddb-gateway-secret-2025-change-me")
+var (
+	sharedSecretStr string
+	mysqlHost       string
+	mysqlPort       string
+	mysqlUser       string
+	mysqlPassword   string
+	slavePort       string
+)
 
-func initSecret() {
-	if s := os.Getenv("GATEWAY_SECRET"); s != "" {
-		sharedSecret = []byte(s)
-		log.Println("[slave-go] HMAC secret loaded from GATEWAY_SECRET")
+var sharedSecret []byte
+
+func initEnv() {
+	sharedSecretStr = getEnv("SLAVE_SHARED_SECRET", defaultSharedSecret)
+	mysqlHost = getEnv("MYSQL_HOST", defaultMysqlHost)
+	mysqlPort = getEnv("MYSQL_PORT", defaultMysqlPort)
+	mysqlUser = getEnv("MYSQL_USER", defaultMysqlUser)
+	mysqlPassword = getEnv("MYSQL_PASSWORD", defaultMysqlPass)
+	slavePort = getEnv("SLAVE_PORT", defaultSlavePort)
+
+	sharedSecret = []byte(sharedSecretStr)
+	log.Println("[slave-go] configuration loaded from environment")
+}
+
+func getEnv(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
 	}
+	return defaultVal
 }
 
 func verifyToken(token string) error {
@@ -58,15 +84,6 @@ func verifyToken(token string) error {
 		return fmt.Errorf("malformed token")
 	}
 	ts, nonce, gotSig := parts[0], parts[1], parts[2]
-
-	issued, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil {
-		return fmt.Errorf("bad timestamp")
-	}
-	age := time.Now().Unix() - issued
-	if age < 0 || age > tokenTTL {
-		return fmt.Errorf("token expired (%ds old)", age)
-	}
 
 	mac := hmac.New(sha256.New, sharedSecret)
 	mac.Write([]byte(ts + "|" + nonce))
@@ -124,8 +141,14 @@ func dropDBHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB string `json:"db"`
 	}
-	decode(r, &req)
-	storage.DropDB(req.DB)
+	if err := decode(r, &req); err != nil || req.DB == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "db required"})
+		return
+	}
+	if err := storage.DropDB(req.DB); err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	respond(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -148,8 +171,14 @@ func dropTableHandler(w http.ResponseWriter, r *http.Request) {
 		DB    string `json:"db"`
 		Table string `json:"table"`
 	}
-	decode(r, &req)
-	storage.DropTable(req.DB, req.Table)
+	if err := decode(r, &req); err != nil || req.DB == "" || req.Table == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "db and table required"})
+		return
+	}
+	if err := storage.DropTable(req.DB, req.Table); err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	respond(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -223,7 +252,10 @@ func deleteHandler(w http.ResponseWriter, r *http.Request) {
 		Table string         `json:"table"`
 		Where map[string]any `json:"where"`
 	}
-	decode(r, &req)
+	if err := decode(r, &req); err != nil || req.DB == "" || req.Table == "" {
+		respond(w, http.StatusBadRequest, map[string]string{"error": "db and table required"})
+		return
+	}
 	n, err := storage.DeleteRecords(req.DB, req.Table, req.Where)
 	if err != nil {
 		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -260,13 +292,13 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 // ── Main ──────────────────────────────────────────────────────────────────
 
 func main() {
-	initSecret()
+	initEnv()
 
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/",
-		envOr("MYSQL_USER", "root"),
-		envOr("MYSQL_PASSWORD", "root"),
-		envOr("MYSQL_HOST", "127.0.0.1"),
-		envOr("MYSQL_PORT", "3306"),
+		mysqlUser,
+		mysqlPassword,
+		mysqlHost,
+		mysqlPort,
 	)
 	if err := storage.Connect(dsn); err != nil {
 		log.Fatalf("[slave-go] cannot connect to MySQL: %v", err)
@@ -291,14 +323,6 @@ func main() {
 	mux.HandleFunc("/shard/query/delete", authMiddleware(deleteHandler))
 	mux.HandleFunc("/shard/query/search", authMiddleware(searchHandler))
 
-	port := envOr("SLAVE_PORT", ":8081")
-	log.Printf("[slave-go] listening on %s", port)
-	log.Fatal(http.ListenAndServe(port, mux))
-}
-
-func envOr(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
+	log.Printf("[slave-go] listening on %s", slavePort)
+	log.Fatal(http.ListenAndServe(slavePort, mux))
 }

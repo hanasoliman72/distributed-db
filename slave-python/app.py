@@ -5,7 +5,7 @@
 # Fault tolerance: writes go to both primary and <db>_replica schema.
 #                  reads fall back to replica on primary failure.
 
-import hashlib, hmac, os, time, logging, traceback
+import hashlib, hmac, time, logging, traceback, os, re
 from flask import Flask, request, jsonify
 import mysql.connector
 
@@ -15,15 +15,13 @@ log = logging.getLogger("slave-python")
 
 # ── Config ────────────────────────────────────────────────────────────────
 MYSQL_CFG = {
-    "host":        os.environ.get("MYSQL_HOST", "127.0.0.1"),
-    "port":        int(os.environ.get("MYSQL_PORT", 3306)),
-    "user":        os.environ.get("MYSQL_USER", "root"),
-    "password":    os.environ.get("MYSQL_PASSWORD", "root"),
-    "auth_plugin": "mysql_native_password",
+    "host":        os.getenv("MYSQL_HOST", "127.0.0.1"),
+    "port":        int(os.getenv("MYSQL_PORT", "3306")),
+    "user":        os.getenv("MYSQL_USER", "root"),
+    "password":    os.getenv("MYSQL_PASSWORD", "root"),
 }
 
-SHARED_SECRET = os.environ.get("GATEWAY_SECRET", "ddb-gateway-secret-2025-change-me").encode()
-TOKEN_TTL = 30  # seconds
+SHARED_SECRET = os.getenv("SLAVE_SHARED_SECRET", "Hana-1234").encode()
 
 # ── HMAC Auth ─────────────────────────────────────────────────────────────
 
@@ -33,9 +31,7 @@ def verify_token(token: str) -> bool:
         if len(parts) != 3:
             return False
         ts, nonce, got_sig = parts
-        age = time.time() - int(ts)
-        if age < 0 or age > TOKEN_TTL:
-            return False
+       
         msg = f"{ts}|{nonce}".encode()
         want_sig = hmac.new(SHARED_SECRET, msg, hashlib.sha256).hexdigest()
         return hmac.compare_digest(got_sig, want_sig)
@@ -95,8 +91,14 @@ def build_where(where: dict):
     if not where:
         return "", []
     clauses = [f"`{c}` = %s" for c in where]
-    args    = [str(v) for v in where.values()]
+    args    = [where[c] for c in where]  # Keep original types, don't stringify
     return " AND ".join(clauses), args
+
+def is_valid_identifier(s: str) -> bool:
+    """Validate SQL identifier (db/table name)"""
+    if not s or len(s) > 64:
+        return False
+    return bool(re.match(r'^[a-zA-Z0-9_-]+$', s))
 
 # ── Health ────────────────────────────────────────────────────────────────
 
@@ -109,7 +111,10 @@ def health():
 @app.route("/shard/db/create", methods=["POST"])
 @require_token
 def create_db():
-    db = request.get_json().get("db")
+    data = request.get_json()
+    db = data.get("db", "")
+    if not db or not is_valid_identifier(db):
+        return jsonify({"error": "invalid db name"}), 400
     for schema in [db, replica(db)]:
         _, _, err = exec_write(f"CREATE DATABASE IF NOT EXISTS `{schema}`")
         if err: return jsonify({"error": err}), 500
@@ -129,9 +134,15 @@ def drop_db():
 @require_token
 def create_table():
     data  = request.get_json()
-    db    = data.get("db"); table = data.get("table"); attrs = data.get("attributes", [])
+    db    = data.get("db", "")
+    table = data.get("table", "")
+    attrs = data.get("attributes", [])
+    if not db or not table or not is_valid_identifier(db) or not is_valid_identifier(table):
+        return jsonify({"error": "invalid db or table name"}), 400
     col_defs = ["`id` INT AUTO_INCREMENT PRIMARY KEY"]
     for a in attrs:
+        if not is_valid_identifier(a):
+            return jsonify({"error": f"invalid attribute name: {a}"}), 400
         if a.lower() != "id":
             col_defs.append(f"`{a}` TEXT")
     cols = ", ".join(col_defs)
@@ -222,7 +233,9 @@ def update_rows():
 
     # Best-effort replica update.
     rep_sql = sql_str.replace(f"`{db}`.", f"`{replica(db)}`.", 1)
-    exec_write(rep_sql, args)
+    _, _, err = exec_write(rep_sql, args)
+    if err:
+        log.warning(f"[replica] failed to update replica {db}.{table}: {err}")
 
     return jsonify({"message": "update complete", "records_updated": affected})
 
@@ -274,6 +287,6 @@ def handle_error(e):
 # ── Entry point ───────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    port = int(os.environ.get("SLAVE_PORT", 8082))
+    port = 8082
     log.info("Python slave listening on :%d", port)
     app.run(host="0.0.0.0", port=port, debug=False)

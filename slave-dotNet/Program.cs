@@ -10,15 +10,14 @@ using System.Text.Json;
 using MySqlConnector;
 
 // ── Config ────────────────────────────────────────────────────────────────
-var mysqlHost = Environment.GetEnvironmentVariable("MYSQL_HOST")     ?? "127.0.0.1";
-var mysqlPort = Environment.GetEnvironmentVariable("MYSQL_PORT")     ?? "3306";
-var mysqlUser = Environment.GetEnvironmentVariable("MYSQL_USER")     ?? "root";
+var mysqlHost = Environment.GetEnvironmentVariable("MYSQL_HOST") ?? "127.0.0.1";
+var mysqlPort = Environment.GetEnvironmentVariable("MYSQL_PORT") ?? "3306";
+var mysqlUser = Environment.GetEnvironmentVariable("MYSQL_USER") ?? "root";
 var mysqlPass = Environment.GetEnvironmentVariable("MYSQL_PASSWORD") ?? "root";
-var slavePort = Environment.GetEnvironmentVariable("SLAVE_PORT")     ?? "8083";
-var secret    = Encoding.UTF8.GetBytes(
-    Environment.GetEnvironmentVariable("GATEWAY_SECRET") ?? "ddb-gateway-secret-2025-change-me");
+var slavePort = Environment.GetEnvironmentVariable("SLAVE_PORT") ?? "8083";
+var secretStr = Environment.GetEnvironmentVariable("SLAVE_SHARED_SECRET") ?? "Hana-1234";
+var secret    = Encoding.UTF8.GetBytes(secretStr);
 
-const int TokenTTL = 30;
 
 var connStr = $"Server={mysqlHost};Port={mysqlPort};User ID={mysqlUser};Password={mysqlPass};" +
               "AllowPublicKeyRetrieval=true;SslMode=None;";
@@ -38,9 +37,7 @@ bool VerifyToken(string token)
         var parts = token.Split('|', 3);
         if (parts.Length != 3) return false;
         var (ts, nonce, gotSig) = (parts[0], parts[1], parts[2]);
-        var age = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - long.Parse(ts);
-        if (age < 0 || age > TokenTTL) return false;
-
+        
         using var mac  = new HMACSHA256(secret);
         var wantBytes  = mac.ComputeHash(Encoding.UTF8.GetBytes($"{ts}|{nonce}"));
         var wantSig    = Convert.ToHexString(wantBytes).ToLower();
@@ -115,6 +112,10 @@ List<string> GetStringList(JsonElement root, string prop) =>
         ? el.EnumerateArray().Select(x => x.GetString() ?? "").ToList()
         : new();
 
+bool IsValidIdentifier(string s) =>
+    !string.IsNullOrEmpty(s) && s.Length <= 64 && 
+    System.Text.RegularExpressions.Regex.IsMatch(s, @"^[a-zA-Z0-9_-]+$");
+
 IResult Ok(object data)  => Results.Json(data, jsonOpts);
 IResult Fail(string msg) => Results.Json(new { error = msg }, jsonOpts, statusCode: 500);
 IResult Bad(string msg)  => Results.Json(new { error = msg }, jsonOpts, statusCode: 400);
@@ -142,6 +143,7 @@ app.MapPost("/shard/db/create", async (HttpRequest req) => await Guarded(req, as
 {
     var body = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body);
     var db   = body.GetProperty("db").GetString() ?? "";
+    if (string.IsNullOrWhiteSpace(db) || !IsValidIdentifier(db)) return Bad("invalid db name");
     try
     {
         foreach (var s in new[] { db, Replica(db) })
@@ -168,9 +170,14 @@ app.MapPost("/shard/table/create", async (HttpRequest req) => await Guarded(req,
     var db    = body.GetProperty("db").GetString()    ?? "";
     var table = body.GetProperty("table").GetString() ?? "";
     var attrs = GetStringList(body, "attributes");
+    if (string.IsNullOrWhiteSpace(db) || string.IsNullOrWhiteSpace(table) || !IsValidIdentifier(db) || !IsValidIdentifier(table))
+        return Bad("invalid db or table name");
     var cols  = new List<string> { "`id` INT AUTO_INCREMENT PRIMARY KEY" };
     foreach (var a in attrs)
+    {
+        if (!IsValidIdentifier(a)) return Bad($"invalid attribute name: {a}");
         if (!a.Equals("id", StringComparison.OrdinalIgnoreCase)) cols.Add($"`{a}` TEXT");
+    }
     var colDef = string.Join(", ", cols);
     try
     {
@@ -225,7 +232,7 @@ app.MapPost("/shard/query/insert", async (HttpRequest req) => await Guarded(req,
         await using var cmd2  = new MySqlCommand(
             $"INSERT IGNORE INTO `{Replica(db)}`.`{table}` ({string.Join(", ", rc)}) VALUES ({string.Join(", ", rp)})", conn2);
         foreach (var (k, v) in rm) cmd2.Parameters.AddWithValue(k, v ?? DBNull.Value);
-        try { await cmd2.ExecuteNonQueryAsync(); } catch { }
+        try { await cmd2.ExecuteNonQueryAsync(); } catch (Exception rex) { log.LogWarning($"[replica] failed to mirror insert to {Replica(db)}.{table}: {rex.Message}"); }
 
         log.LogInformation("[INSERT] {Db}.{Tbl} id={Id}", db, table, genId);
         return Results.Json(new { message = "record inserted", generated_id = genId }, jsonOpts, statusCode: 201);
@@ -291,7 +298,8 @@ app.MapPut("/shard/query/update", async (HttpRequest req) => await Guarded(req, 
         var affected = await cmd.ExecuteNonQueryAsync();
 
         // Best-effort replica update.
-        try { await Exec(sqlStr.Replace($"`{db}`.", $"`{Replica(db)}`."), parms); } catch { }
+        try { await Exec(sqlStr.Replace($"`{db}`.", $"`{Replica(db)}`."), parms); }
+        catch (Exception rex) { log.LogWarning($"[replica] failed to update replica {db}: {rex.Message}"); }
 
         return Ok(new { message = "update complete", records_updated = affected });
     }
@@ -317,7 +325,8 @@ app.MapDelete("/shard/query/delete", async (HttpRequest req) => await Guarded(re
         if (parms != null) foreach (var (k, v) in parms) cmd.Parameters.AddWithValue(k, v ?? DBNull.Value);
         var affected = await cmd.ExecuteNonQueryAsync();
 
-        try { await Exec(sqlStr.Replace($"`{db}`.", $"`{Replica(db)}`."), parms); } catch { }
+        try { await Exec(sqlStr.Replace($"`{db}`.", $"`{Replica(db)}`."), parms); }
+        catch (Exception rex) { log.LogWarning($"[replica] failed to delete from replica {db}: {rex.Message}"); }
 
         return Ok(new { message = "delete complete", records_deleted = affected });
     }
