@@ -1,23 +1,23 @@
 {
   "format": 1,
   "restore": {
-    "C:\\Users\\MK\\Desktop\\fourth year second term\\Distributed Database\\DDB Project\\distributed-db\\slave-dotNet\\Slavenode.csproj": {}
+    "D:\\VS Code Projects\\Distributed Database\\slave-dotNet\\Slavenode.csproj": {}
   },
   "projects": {
-    "C:\\Users\\MK\\Desktop\\fourth year second term\\Distributed Database\\DDB Project\\distributed-db\\slave-dotNet\\Slavenode.csproj": {
+    "D:\\VS Code Projects\\Distributed Database\\slave-dotNet\\Slavenode.csproj": {
       "version": "1.0.0",
       "restore": {
-        "projectUniqueName": "C:\\Users\\MK\\Desktop\\fourth year second term\\Distributed Database\\DDB Project\\distributed-db\\slave-dotNet\\Slavenode.csproj",
+        "projectUniqueName": "D:\\VS Code Projects\\Distributed Database\\slave-dotNet\\Slavenode.csproj",
         "projectName": "Slavenode",
-        "projectPath": "C:\\Users\\MK\\Desktop\\fourth year second term\\Distributed Database\\DDB Project\\distributed-db\\slave-dotNet\\Slavenode.csproj",
-        "packagesPath": "C:\\Users\\MK\\.nuget\\packages\\",
-        "outputPath": "C:\\Users\\MK\\Desktop\\fourth year second term\\Distributed Database\\DDB Project\\distributed-db\\slave-dotNet\\obj\\",
+        "projectPath": "D:\\VS Code Projects\\Distributed Database\\slave-dotNet\\Slavenode.csproj",
+        "packagesPath": "C:\\Users\\Win11\\.nuget\\packages\\",
+        "outputPath": "D:\\VS Code Projects\\Distributed Database\\slave-dotNet\\obj\\",
         "projectStyle": "PackageReference",
         "fallbackFolders": [
           "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"
         ],
         "configFilePaths": [
-          "C:\\Users\\MK\\AppData\\Roaming\\NuGet\\NuGet.Config",
+          "C:\\Users\\Win11\\AppData\\Roaming\\NuGet\\NuGet.Config",
           "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
           "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
         ],
@@ -74,7 +74,7 @@
               "privateAssets": "all"
             }
           },
-          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.313/PortableRuntimeIdentifierGraph.json"
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\9.0.308/PortableRuntimeIdentifierGraph.json"
         }
       }
     }
