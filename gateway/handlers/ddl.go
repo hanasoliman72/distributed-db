@@ -1,19 +1,5 @@
 package handlers
 
-// ddl.go
-//
-// Handlers for schema-management (DDL) operations.
-//
-// DB-DROP RESILIENCE NOTE
-// ───────────────────────
-// DropDB does NOT remove table metadata from the shard map.  The slave
-// storage layer already transparently falls back to the <db>_replica schema
-// on every read and write, so queries keep working even after the primary DB
-// is gone.  Keeping the TableMeta entries means the gateway still knows which
-// slave owns each shard and can route traffic correctly.
-//
-// Only /table/drop explicitly removes a TableMeta entry.
-
 import (
 	"gateway/metadata"
 	"gateway/shard"
@@ -21,7 +7,6 @@ import (
 )
 
 // ── /db/create  POST ───────────────────────────────────────────────────────
-
 func CreateDB(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB string `json:"db"`
@@ -59,16 +44,6 @@ func CreateDB(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── /db/drop  DELETE ───────────────────────────────────────────────────────
-//
-// The primary DB is dropped from every slave but the shard map (TableMeta) is
-// intentionally kept intact.  This means:
-//   • Subsequent SELECT / INSERT / UPDATE / DELETE calls are still routed to
-//     the correct shards.
-//   • Each slave's storage layer will transparently use <db>_replica for
-//     every operation (storage.go already implements this).
-//   • If the caller later re-creates the DB, inserts will go to the primary
-//     again and the replica will stay in sync as usual.
-
 func DropDB(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB string `json:"db"`
@@ -85,19 +60,13 @@ func DropDB(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
 		return
 	}
-
-	// ── KEY CHANGE: do NOT remove TableMeta entries ───────────────────────
-	// MarkDBDropped bumps the version and replicates so every node knows the
-	// primary is gone, but leaves the shard map intact.
 	metadata.MarkDBDropped(req.DB)
-
 	respond(w, http.StatusOK, map[string]string{
 		"message": "database '" + req.DB + "' dropped; shard routing retained for replica fallback",
 	})
 }
 
 // ── /table/create  POST ────────────────────────────────────────────────────
-
 func CreateTable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB         string   `json:"db"`
@@ -118,7 +87,6 @@ func CreateTable(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
 	results := shard.BroadcastAll("POST", "/shard/table/create", map[string]any{
 		"db":         req.DB,
 		"table":      req.Table,
@@ -132,7 +100,6 @@ func CreateTable(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-
 	metadata.SaveMetadata()
 	respond(w, http.StatusCreated, map[string]any{
 		"message":     "table '" + req.Table + "' created",
@@ -142,7 +109,6 @@ func CreateTable(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── /table/drop  DELETE ────────────────────────────────────────────────────
-
 func DropTable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB    string `json:"db"`
@@ -154,10 +120,7 @@ func DropTable(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	// Remove the shard-map entry first so no new queries can arrive.
 	metadata.DropTableMeta(req.DB, req.Table)
-
 	results := shard.BroadcastAll("DELETE", "/shard/table/drop", map[string]any{
 		"db":    req.DB,
 		"table": req.Table,
@@ -166,7 +129,6 @@ func DropTable(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
 		return
 	}
-
 	metadata.SaveMetadata()
 	respond(w, http.StatusOK, map[string]string{
 		"message": "table '" + req.Table + "' dropped",

@@ -1,10 +1,3 @@
-# slave-python/app.py
-#
-# Python slave node (Shard B).
-# Security: every request must carry X-Gateway-Token (HMAC-SHA256).
-# Fault tolerance: writes go to both primary and <db>_replica schema.
-#                  reads fall back to replica on primary failure.
-
 import hashlib, hmac, time, logging, traceback, os, re
 from flask import Flask, request, jsonify
 import mysql.connector
@@ -24,7 +17,6 @@ MYSQL_CFG = {
 SHARED_SECRET = os.getenv("SLAVE_SHARED_SECRET", "Hana-1234").encode()
 
 # ── HMAC Auth ─────────────────────────────────────────────────────────────
-
 def verify_token(token: str) -> bool:
     try:
         parts = token.split("|", 1)
@@ -58,7 +50,6 @@ def require_token(f):
     return decorated
 
 # ── MySQL helpers ─────────────────────────────────────────────────────────
-
 def replica(db: str) -> str:
     return db + "_replica"
 
@@ -110,13 +101,11 @@ def is_valid_identifier(s: str) -> bool:
     return bool(re.match(r'^[a-zA-Z0-9_-]+$', s))
 
 # ── Health ────────────────────────────────────────────────────────────────
-
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "role": "slave-python"})
 
 # ── DB DDL ────────────────────────────────────────────────────────────────
-
 @app.route("/shard/db/create", methods=["POST"])
 @require_token
 def create_db():
@@ -138,7 +127,6 @@ def drop_db():
     return jsonify({"status": "ok"})
 
 # ── Table DDL ─────────────────────────────────────────────────────────────
-
 @app.route("/shard/table/create", methods=["POST"])
 @require_token
 def create_table():
@@ -170,7 +158,6 @@ def drop_table():
     return jsonify({"status": "ok"})
 
 # ── INSERT ────────────────────────────────────────────────────────────────
-
 @app.route("/shard/query/insert", methods=["POST"])
 @require_token
 def insert():
@@ -187,7 +174,6 @@ def insert():
         f"INSERT INTO `{db}`.`{table}` ({', '.join(cols)}) VALUES ({', '.join(phs)})", vals)
     if err: return jsonify({"error": err}), 500
 
-    # Mirror to replica with explicit id.
     rep_record = dict(record)
     rep_record["id"] = gen_id
     rep_cols = [f"`{c}`" for c in rep_record]
@@ -200,7 +186,6 @@ def insert():
     return jsonify({"message": "record inserted", "generated_id": gen_id}), 201
 
 # ── SELECT ────────────────────────────────────────────────────────────────
-
 @app.route("/shard/query/select", methods=["GET"])
 @require_token
 def select_rows():
@@ -222,7 +207,6 @@ def select_rows():
     return jsonify({"count": len(rows), "records": rows})
 
 # ── UPDATE ────────────────────────────────────────────────────────────────
-
 @app.route("/shard/query/update", methods=["PUT"])
 @require_token
 def update_rows():
@@ -249,7 +233,6 @@ def update_rows():
     return jsonify({"message": "update complete", "records_updated": affected})
 
 # ── DELETE ────────────────────────────────────────────────────────────────
-
 @app.route("/shard/query/delete", methods=["DELETE"])
 @require_token
 def delete_rows():
@@ -269,7 +252,6 @@ def delete_rows():
     return jsonify({"message": "delete complete", "records_deleted": affected})
 
 # ── SEARCH ────────────────────────────────────────────────────────────────
-
 @app.route("/shard/query/search", methods=["GET"])
 @require_token
 def search():
@@ -287,14 +269,12 @@ def search():
     return jsonify({"search_term": term, "count": len(matched), "records": matched})
 
 # ── Error handler ─────────────────────────────────────────────────────────
-
 @app.errorhandler(Exception)
 def handle_error(e):
     log.error("Unhandled:\n%s", traceback.format_exc())
     return jsonify({"error": str(e)}), 500
 
 # ── Entry point ───────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     port = 8082
     log.info("Python slave listening on :%d", port)

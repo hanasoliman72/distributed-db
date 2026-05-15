@@ -1,26 +1,5 @@
 package main
 
-// mapreducer/main.go
-//
-// The MapReducer is a lightweight HTTP service that the gateway calls when it
-// needs to merge results from multiple shards (SELECT fan-out, SEARCH).
-//
-// It is intentionally stateless: it receives a batch of row lists, applies
-// optional filters / ordering, and returns the merged set.
-//
-// POST /reduce
-// Body:
-//   {
-//     "shards":  [ [ {row}, {row} ], [ {row} ], … ],   // one array per shard
-//     "order_by": "age",                                 // optional
-//     "order":    "asc" | "desc",                        // optional, default "asc"
-//     "limit":    100                                     // optional, 0 = no limit
-//   }
-// Response:
-//   { "count": N, "records": [ … ] }
-//
-// The gateway calls this service transparently — clients never see it.
-
 import (
 	"encoding/json"
 	"fmt"
@@ -46,7 +25,6 @@ func main() {
 }
 
 // ── /reduce  POST ──────────────────────────────────────────────────────────
-
 func reduceHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -63,20 +41,15 @@ func reduceHandler(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-
-	// MAP: flatten all shard results into one slice.
 	merged := make([]map[string]any, 0)
 	for _, shardRows := range req.Shards {
 		merged = append(merged, shardRows...)
 	}
-
-	// REDUCE: optional sort.
 	if req.OrderBy != "" {
 		desc := req.Order == "desc"
 		sort.SliceStable(merged, func(i, j int) bool {
 			vi := fmt.Sprintf("%v", merged[i][req.OrderBy])
 			vj := fmt.Sprintf("%v", merged[j][req.OrderBy])
-			// Try numeric comparison first.
 			fi, erri := strconv.ParseFloat(vi, 64)
 			fj, errj := strconv.ParseFloat(vj, 64)
 			if erri == nil && errj == nil {
@@ -91,12 +64,9 @@ func reduceHandler(w http.ResponseWriter, r *http.Request) {
 			return vi < vj
 		})
 	}
-
-	// REDUCE: optional limit.
 	if req.Limit > 0 && len(merged) > req.Limit {
 		merged = merged[:req.Limit]
 	}
-
 	respond(w, http.StatusOK, map[string]any{"count": len(merged), "records": merged})
 }
 

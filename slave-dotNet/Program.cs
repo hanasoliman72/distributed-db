@@ -1,9 +1,3 @@
-// slave-dotnet/Program.cs
-//
-// .NET slave node (Shard C).
-// Security  : every /shard/* request must carry X-Gateway-Token (HMAC-SHA256).
-// Resilience: writes mirror to <db>_replica schema; reads fall back to it.
-
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -29,7 +23,6 @@ var jsonOpts = new JsonSerializerOptions
 };
 
 // ── HMAC Auth ─────────────────────────────────────────────────────────────
-
 bool VerifyToken(string token)
 {
     try
@@ -54,8 +47,6 @@ var wantBytes = mac.ComputeHash(
 
 IResult Forbidden(string msg) =>
     Results.Json(new { error = msg }, jsonOpts, statusCode: 403);
-
-// Minimal middleware helper: checks token and runs handler.
 async Task<IResult> Guarded(HttpRequest req, Func<Task<IResult>> handler)
 {
     var token = req.Headers["X-Gateway-Token"].FirstOrDefault() ?? "";
@@ -64,7 +55,6 @@ async Task<IResult> Guarded(HttpRequest req, Func<Task<IResult>> handler)
 }
 
 // ── MySQL helpers ─────────────────────────────────────────────────────────
-
 string Replica(string db) => db + "_replica";
 
 MySqlConnection Open()
@@ -138,12 +128,10 @@ try { using var t = Open(); log.LogInformation("[slave-dotnet] MySQL connected")
 catch (Exception ex) { log.LogError("Cannot connect MySQL: {E}", ex.Message); return; }
 
 // ── Health (no auth) ──────────────────────────────────────────────────────
-
 app.MapGet("/health", () =>
     Results.Json(new { status = "ok", role = "slave-dotnet" }, jsonOpts));
 
 // ── DB DDL ────────────────────────────────────────────────────────────────
-
 app.MapPost("/shard/db/create", async (HttpRequest req) => await Guarded(req, async () =>
 {
     var body = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body);
@@ -168,7 +156,6 @@ app.MapDelete("/shard/db/drop", async (HttpRequest req) => await Guarded(req, as
 }));
 
 // ── Table DDL ─────────────────────────────────────────────────────────────
-
 app.MapPost("/shard/table/create", async (HttpRequest req) => await Guarded(req, async () =>
 {
     var body  = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body);
@@ -207,7 +194,6 @@ app.MapDelete("/shard/table/drop", async (HttpRequest req) => await Guarded(req,
 }));
 
 // ── INSERT ────────────────────────────────────────────────────────────────
-
 app.MapPost("/shard/query/insert", async (HttpRequest req) => await Guarded(req, async () =>
 {
     var body   = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body);
@@ -246,7 +232,6 @@ app.MapPost("/shard/query/insert", async (HttpRequest req) => await Guarded(req,
 }));
 
 // ── SELECT ────────────────────────────────────────────────────────────────
-
 app.MapGet("/shard/query/select", async (HttpRequest req) => await Guarded(req, async () =>
 {
     var q     = req.Query;
@@ -267,7 +252,6 @@ app.MapGet("/shard/query/select", async (HttpRequest req) => await Guarded(req, 
     }
     catch
     {
-        // Fallback to replica.
         try
         {
             var repSql  = sqlStr.Replace($"`{db}`.", $"`{Replica(db)}`.");
@@ -279,7 +263,6 @@ app.MapGet("/shard/query/select", async (HttpRequest req) => await Guarded(req, 
 }));
 
 // ── UPDATE ────────────────────────────────────────────────────────────────
-
 app.MapPut("/shard/query/update", async (HttpRequest req) => await Guarded(req, async () =>
 {
     var body  = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body);
@@ -312,7 +295,6 @@ app.MapPut("/shard/query/update", async (HttpRequest req) => await Guarded(req, 
 }));
 
 // ── DELETE ────────────────────────────────────────────────────────────────
-
 app.MapDelete("/shard/query/delete", async (HttpRequest req) => await Guarded(req, async () =>
 {
     var body  = await JsonSerializer.DeserializeAsync<JsonElement>(req.Body);
@@ -339,7 +321,6 @@ app.MapDelete("/shard/query/delete", async (HttpRequest req) => await Guarded(re
 }));
 
 // ── SEARCH ────────────────────────────────────────────────────────────────
-
 app.MapGet("/shard/query/search", async (HttpRequest req) => await Guarded(req, async () =>
 {
     var q     = req.Query;

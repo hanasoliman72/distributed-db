@@ -1,11 +1,5 @@
 package shard
 
-// shard.go
-//
-// Handles all communication from the gateway to individual slaves.
-// Every outbound request carries a fresh HMAC token so slaves can verify
-// the request really came from the gateway (not a rogue client).
-
 import (
 	"bytes"
 	"encoding/json"
@@ -20,7 +14,6 @@ import (
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 
-// Result is the outcome of forwarding one request to one slave.
 type Result struct {
 	SlaveID    string
 	StatusCode int
@@ -28,8 +21,6 @@ type Result struct {
 	Err        error
 }
 
-// Forward sends a JSON payload to slave.URL+endpoint using the given method,
-// attaching a fresh HMAC token header.
 func Forward(slave *metadata.Slave, method, endpoint string, payload any) Result {
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -68,7 +59,6 @@ func Forward(slave *metadata.Slave, method, endpoint string, payload any) Result
 	return Result{SlaveID: slave.ID, StatusCode: resp.StatusCode, Body: respBody}
 }
 
-// ForwardGet sends a GET request to slave.URL+path (path may include query params).
 func ForwardGet(slave *metadata.Slave, path string) Result {
 	token, err := auth.NewToken()
 	if err != nil {
@@ -95,9 +85,6 @@ func ForwardGet(slave *metadata.Slave, path string) Result {
 	return Result{SlaveID: slave.ID, StatusCode: resp.StatusCode, Body: respBody}
 }
 
-// BroadcastAll sends payload to every alive slave and collects results.
-// Used for DDL operations (create/drop DB, create/drop table) that must touch
-// all shards.
 func BroadcastAll(method, endpoint string, payload any) []Result {
 	alive := metadata.AliveSlaves()
 	if len(alive) == 0 {

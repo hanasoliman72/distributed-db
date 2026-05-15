@@ -1,15 +1,5 @@
 package handlers
 
-// dml.go
-//
-// Handlers for data-manipulation operations.
-//
-// INSERT  → route to one shard (round-robin among alive slaves)
-// SELECT  → fan-out to ALL shards, merge results via MapReducer service
-// UPDATE  → route to the shard that owns the id (or all if no id filter)
-// DELETE  → same routing logic as UPDATE
-// SEARCH  → fan-out to ALL shards, merge via MapReducer service
-
 import (
 	"bytes"
 	"encoding/json"
@@ -22,15 +12,10 @@ import (
 	"time"
 )
 
-// mapReducerURL is the address of the MapReducer service.
-// It is intentionally a package-level var so tests can override it.
 var mapReducerURL = "http://127.0.0.1:8090"
 
 var mrClient = &http.Client{Timeout: 10 * time.Second}
 
-// callMapReducer sends per-shard row buckets to the MapReducer and returns
-// the merged, optionally sorted/limited result set.
-// Falls back to simple concatenation if the MapReducer is unreachable.
 func callMapReducer(shards [][]any, orderBy, order string, limit int) ([]any, error) {
 	payload := map[string]any{
 		"shards":   shards,
@@ -60,9 +45,6 @@ func callMapReducer(shards [][]any, orderBy, order string, limit int) ([]any, er
 	}
 	return result.Records, nil
 }
-
-// toAnySlice safely casts []map[string]any (returned by individual shards) to
-// []any so it fits the [][]any expected by callMapReducer.
 func toAnySlice(rows []map[string]any) []any {
 	out := make([]any, len(rows))
 	for i, r := range rows {
@@ -72,7 +54,6 @@ func toAnySlice(rows []map[string]any) []any {
 }
 
 // ── /query/insert  POST ────────────────────────────────────────────────────
-
 func Insert(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB     string         `json:"db"`
@@ -110,13 +91,11 @@ func Insert(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusBadGateway, map[string]string{"error": res.Err.Error()})
 		return
 	}
-
 	res.Body["shard"] = target.ID
 	respond(w, res.StatusCode, res.Body)
 }
 
 // ── /query/select  GET ─────────────────────────────────────────────────────
-
 func Select(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	db := q.Get("db")
@@ -139,12 +118,9 @@ func Select(w http.ResponseWriter, r *http.Request) {
 					respond(w, res.StatusCode, res.Body)
 					return
 				}
-				// Fall through to full fan-out on error.
 			}
 		}
 	}
-
-	// Fan-out: query every alive shard in parallel.
 	alive := metadata.AliveSlaves()
 	if len(alive) == 0 {
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
@@ -165,8 +141,6 @@ func Select(w http.ResponseWriter, r *http.Request) {
 				ch <- shardResult{err: res.Err}
 				return
 			}
-			// The slave returns {"count":N,"records":[…]}
-			// records can be []any (JSON array of objects).
 			rows, _ := res.Body["records"].([]any)
 			ch <- shardResult{rows: rows}
 		}(s)
@@ -181,7 +155,6 @@ func Select(w http.ResponseWriter, r *http.Request) {
 	}
 	close(ch)
 
-	// Merge via MapReducer (handles sort + limit).
 	orderBy := q.Get("order_by")
 	order := q.Get("order")
 	limit := 0
@@ -192,12 +165,10 @@ func Select(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
 	respond(w, http.StatusOK, map[string]any{"count": len(merged), "records": merged})
 }
 
 // ── /query/update  PUT ─────────────────────────────────────────────────────
-
 func Update(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB    string         `json:"db"`
@@ -240,7 +211,6 @@ func Update(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── /query/delete  DELETE ──────────────────────────────────────────────────
-
 func Delete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB    string         `json:"db"`
@@ -281,7 +251,6 @@ func Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── /query/search  GET ─────────────────────────────────────────────────────
-
 func Search(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	db := q.Get("db")
@@ -315,7 +284,6 @@ func Search(w http.ResponseWriter, r *http.Request) {
 			ch <- rows
 		}(s)
 	}
-
 	shardBuckets := make([][]any, 0, len(alive))
 	for range alive {
 		if rows := <-ch; rows != nil {
@@ -323,13 +291,11 @@ func Search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	close(ch)
-
 	merged, err := callMapReducer(shardBuckets, "", "", 0)
 	if err != nil {
 		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-
 	respond(w, http.StatusOK, map[string]any{
 		"search_term": term,
 		"count":       len(merged),
@@ -338,10 +304,6 @@ func Search(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── helpers ────────────────────────────────────────────────────────────────
-
-// routeWriteTargets returns the slave(s) that should receive a write.
-// If "id" is present in the where clause, route only to the owning shard.
-// Otherwise broadcast to all alive slaves.
 func routeWriteTargets(db, table string, where map[string]any) []*metadata.Slave {
 	if idVal, ok := where["id"]; ok {
 		meta := metadata.GetTableMeta(db, table)

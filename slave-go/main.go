@@ -1,29 +1,5 @@
 package main
 
-// slave-go/main.go
-//
-// Go slave node — handles its assigned shard of the data.
-//
-// FAILOVER ROLE
-// If the gateway at :8080 fails to respond to /health for
-// gatewayMissedPings consecutive checks, this slave promotes itself:
-//   1. Reads metadata.json (written by the gateway on every DDL change).
-//   2. Loads the shard map and slave registry into memory.
-//   3. Starts the full gateway HTTP mux on :8080 in a new goroutine,
-//      including DDL / DML / auth-forwarding handlers.
-//   4. Continues serving its own shard on its original port (:8081).
-//
-// The promoted slave signs outbound requests to the other slaves using the
-// same HMAC secret, so they never notice the switch.
-//
-// Security:
-//   Every /shard/* request must carry a valid X-Gateway-Token header.
-//   /health is public.
-//
-// Fault tolerance:
-//   Reads fall back to the local _replica schema if the primary fails.
-//   Writes go to both primary and replica.
-
 import (
 	"bytes"
 	"context"
@@ -38,15 +14,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"slave/storage"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"slave/storage"
 )
-
-// ── Constants ─────────────────────────────────────────────────────────────
 
 const (
 	defaultSharedSecret = "Hana-1234"
@@ -63,8 +36,6 @@ const (
 	gatewayMissedPings   = 3
 )
 
-// ── Runtime state ─────────────────────────────────────────────────────────
-
 var (
 	sharedSecretStr string
 	mysqlHost       string
@@ -75,12 +46,7 @@ var (
 	slaveID         string
 	metadataFile    string
 	sharedSecret    []byte
-
-	// isGateway is set to 1 atomically when this slave promotes itself.
-	isGateway int32
-
-	// Demotion control: when the original gateway comes back online,
-	// the promoted slave will gracefully shut down and yield :8080.
+	isGateway       int32
 	promoServer     *http.Server
 	promoDemoteChan = make(chan struct{})
 	promoCtx        context.Context
@@ -108,10 +74,6 @@ func getEnv(key, def string) string {
 }
 
 // ── HMAC — verifying inbound tokens (slave role) ──────────────────────────
-//
-// Token format: <nonce>|<HMAC-SHA256(secret, nonce)>
-// No timestamp — the 16-byte random nonce is the uniqueness guarantee.
-
 func verifyToken(token string) error {
 	parts := strings.SplitN(token, "|", 2)
 	if len(parts) != 2 {
@@ -147,9 +109,6 @@ func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 }
 
 // ── HMAC — minting outbound tokens (gateway role) ─────────────────────────
-//
-// Token format: <nonce>|<HMAC-SHA256(secret, nonce)>
-
 func newToken() (string, error) {
 	buf := make([]byte, 16)
 	if _, err := rand.Read(buf); err != nil {
@@ -163,7 +122,6 @@ func newToken() (string, error) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
-
 func respond(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -175,7 +133,6 @@ func decode(r *http.Request, dst any) error {
 }
 
 // ── Own-shard handlers ────────────────────────────────────────────────────
-
 func createDBHandler(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB string `json:"db"`
@@ -200,9 +157,6 @@ func dropDBHandler(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	// Mark immediately so the storage layer redirects all subsequent
-	// reads/writes to the replica schema without waiting for the async
-	// metadata-sync message from the gateway.
 	storage.MarkDBDropped(req.DB)
 	respond(w, http.StatusOK, map[string]string{"status": "ok"})
 }
@@ -343,7 +297,6 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Gateway watchdog ──────────────────────────────────────────────────────
-
 func watchGateway() {
 	cl := &http.Client{Timeout: 2 * time.Second}
 	missed := 0
@@ -374,21 +327,13 @@ func watchGateway() {
 }
 
 // ── Promoted-gateway state ────────────────────────────────────────────────
-
 var (
-	promoMu      sync.RWMutex
-	promoSlaves  []*promoSlave
-	promoTables  = map[string]*promoTableMeta{}
-	promoRRMu    sync.Mutex
-	promoRRCtr   int
-
-	// promoVersion is a monotonic counter bumped on every DDL the promoted
-	// gateway handles. It is written into savePromotedMetadata so that when
-	// the original gateway calls /gateway/sync it sees a version strictly
-	// greater than what it had before going down.
-	promoVersion int64
-
-	// promoDroppedDBs tracks databases dropped while this slave acts as gateway.
+	promoMu         sync.RWMutex
+	promoSlaves     []*promoSlave
+	promoTables     = map[string]*promoTableMeta{}
+	promoRRMu       sync.Mutex
+	promoRRCtr      int
+	promoVersion    int64
 	promoDroppedMu  sync.RWMutex
 	promoDroppedDBs = map[string]struct{}{}
 )
@@ -411,21 +356,16 @@ type promoTableMeta struct {
 	SlaveIDs   []string `json:"SlaveIDs"`
 }
 
-// promote loads metadata.json and starts the gateway mux on :8080.
-// Also starts a demotion checker to gracefully shut down if the original gateway recovers.
 func promote() {
 	atomic.StoreInt32(&isGateway, 1)
 	if err := loadPromotedMetadata(); err != nil {
 		log.Fatalf("[slave-go] promote: cannot load metadata: %v", err)
 	}
 	log.Printf("[slave-go] promote: %d slaves, %d tables loaded", len(promoSlaves), len(promoTables))
-
-	// Create context for graceful shutdown
 	promoCtx, promoCancel = context.WithCancel(context.Background())
 
 	go promoHealthChecker(10 * time.Second)
 	go demotionChecker(10 * time.Second)
-
 	go func() {
 		mux := buildGatewayMux()
 		promoServer = &http.Server{
@@ -439,7 +379,6 @@ func promote() {
 	}()
 }
 
-// demotionChecker monitors the original gateway and triggers demotion if it comes back online.
 func demotionChecker(interval time.Duration) {
 	cl := &http.Client{Timeout: 2 * time.Second}
 	log.Printf("[slave-go] demotion checker: will monitor %s every %v", gatewayURL, interval)
@@ -450,7 +389,6 @@ func demotionChecker(interval time.Duration) {
 	for {
 		select {
 		case <-ticker.C:
-			// Check if the original gateway is back online
 			resp, err := cl.Get(gatewayURL + "/health")
 			if err != nil {
 				continue
@@ -470,13 +408,11 @@ func demotionChecker(interval time.Duration) {
 	}
 }
 
-// demote gracefully shuts down the promoted gateway and returns to slave-only mode.
 func demote() {
 	atomic.StoreInt32(&isGateway, 0)
 	if promoCancel != nil {
 		promoCancel()
 	}
-	// Try to sync metadata back to the original gateway before shutting down.
 	syncMetadataToGateway()
 	if promoServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -487,15 +423,12 @@ func demote() {
 		promoServer = nil
 		log.Println("[slave-go] *** DEMOTED — back to SLAVE-ONLY mode on :8081 ***")
 	}
-	// Restart the watchdog to monitor the gateway again
 	go watchGateway()
 }
 
-// snapshotOnDisk is the canonical JSON format shared with the gateway.
-// It MUST match gateway/metadata.Snapshot field-for-field.
 type snapshotOnDisk struct {
-	Version    int64  `json:"version"`
-	Slaves     []struct {
+	Version int64 `json:"version"`
+	Slaves  []struct {
 		ID  string `json:"id"`
 		URL string `json:"url"`
 	} `json:"slaves"`
@@ -519,13 +452,7 @@ func loadPromotedMetadata() error {
 	if err := json.Unmarshal(data, &snap); err != nil {
 		return fmt.Errorf("unmarshal: %w", err)
 	}
-
-	// Restore version counter so future DDL bumps produce higher numbers.
 	atomic.StoreInt64(&promoVersion, snap.Version)
-
-	// Restore dropped-DB set so the storage layer skips primary attempts.
-	// ApplyDroppedDBs REPLACES the entire set (not additive) so stale
-	// entries from a previous session do not survive a restart.
 	promoDroppedMu.Lock()
 	promoDroppedDBs = make(map[string]struct{}, len(snap.DroppedDBs))
 	for _, d := range snap.DroppedDBs {
@@ -603,15 +530,10 @@ func savePromotedMetadata() {
 		droppedList = append(droppedList, d)
 	}
 	promoDroppedMu.RUnlock()
-
-	// Write a full Snapshot that matches gateway/metadata.Snapshot exactly.
-	// The version field is the key fix — without it the gateway rejects the
-	// sync payload as stale (version=0 <= current).
 	snap := snapshotOnDisk{
 		Version:    atomic.LoadInt64(&promoVersion),
 		DroppedDBs: droppedList,
 	}
-	// Assign via reflection-friendly intermediate (avoids anonymous-struct copy issues).
 	for _, s := range slaves {
 		snap.Slaves = append(snap.Slaves, struct {
 			ID  string `json:"id"`
@@ -637,8 +559,6 @@ func savePromotedMetadata() {
 	log.Printf("[slave-go] metadata saved (version=%d)", atomic.LoadInt64(&promoVersion))
 }
 
-// syncMetadataToGateway posts the promoted node's metadata.json to the original
-// gateway so it can reload any DDL changes that happened while it was down.
 func syncMetadataToGateway() {
 	data, err := os.ReadFile(metadataFile)
 	if err != nil {
@@ -743,8 +663,6 @@ func nextInsertSlave(meta *promoTableMeta) (*promoSlave, int, error) {
 	return nil, 0, fmt.Errorf("no alive slave for %s.%s", meta.DB, meta.Table)
 }
 
-// ── HTTP forwarding ───────────────────────────────────────────────────────
-
 var promoHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 type fwdResult struct {
@@ -838,7 +756,6 @@ func routeWriteTargets(db, table string, where map[string]any) []*promoSlave {
 }
 
 // ── Promoted gateway mux ──────────────────────────────────────────────────
-
 func gwMethod(m string, h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != m {
@@ -872,7 +789,6 @@ func buildGatewayMux() *http.ServeMux {
 	})
 
 	// ── DDL ───────────────────────────────────────────────────────────
-
 	mux.HandleFunc("/db/create", gwMethod("POST", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			DB string `json:"db"`
@@ -892,9 +808,6 @@ func buildGatewayMux() *http.ServeMux {
 				return
 			}
 		}
-		// Clear dropped-DB state so future inserts route to the primary again.
-		// This must happen on both the promo registry AND the local storage layer
-		// (which handles inserts on this node itself).
 		promoDroppedMu.Lock()
 		delete(promoDroppedDBs, req.DB)
 		promoDroppedMu.Unlock()
@@ -912,12 +825,10 @@ func buildGatewayMux() *http.ServeMux {
 			respond(w, http.StatusBadRequest, map[string]string{"error": "'db' is required"})
 			return
 		}
-		// Record the drop in the promoted gateway's dropped set and storage layer.
 		promoDroppedMu.Lock()
 		promoDroppedDBs[req.DB] = struct{}{}
 		promoDroppedMu.Unlock()
 		storage.MarkDBDropped(req.DB)
-		// Bump version so the restored gateway adopts this state.
 		atomic.AddInt64(&promoVersion, 1)
 		broadcastAll("DELETE", "/shard/db/drop", map[string]any{"db": req.DB})
 		savePromotedMetadata()
@@ -978,7 +889,6 @@ func buildGatewayMux() *http.ServeMux {
 	}))
 
 	// ── DML ───────────────────────────────────────────────────────────
-
 	mux.HandleFunc("/query/insert", gwMethod("POST", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			DB     string         `json:"db"`
@@ -1153,7 +1063,6 @@ func buildGatewayMux() *http.ServeMux {
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────
-
 func main() {
 	initEnv()
 
@@ -1177,10 +1086,6 @@ func main() {
 	mux.HandleFunc("/shard/query/delete", authMiddleware(deleteHandler))
 	mux.HandleFunc("/shard/query/search", authMiddleware(searchHandler))
 
-	// /shard/metadata/sync — gateway POSTs the full Snapshot here after every
-	// DDL change. This was the missing endpoint that caused all replication
-	// calls to silently fail with 404. No auth required (gateway signs with
-	// X-Gateway-Token but this path is internal infra, not data).
 	mux.HandleFunc("/shard/metadata/sync", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -1196,15 +1101,10 @@ func main() {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		// Persist to disk atomically so it survives a restart.
 		tmp := metadataFile + ".tmp"
 		if err := os.WriteFile(tmp, data, 0644); err == nil {
 			os.Rename(tmp, metadataFile)
 		}
-		// Authoritatively REPLACE the entire dropped-DB set.
-		// Using ApplyDroppedDBs (not a loop of MarkDBDropped) means stale entries
-		// are removed when the gateway sends a snapshot with a shorter list
-		// (e.g. after /db/create clears a DB from DroppedDBs).
 		storage.ApplyDroppedDBs(snap.DroppedDBs)
 		log.Printf("[slave-go] /shard/metadata/sync: version=%d, tables=%d, dropped=%v",
 			snap.Version, len(snap.Tables), snap.DroppedDBs)

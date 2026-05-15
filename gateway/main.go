@@ -1,18 +1,5 @@
 package main
 
-// gateway/main.go
-//
-// API Gateway — the single entry point for all client requests.
-// Responsibilities:
-//   - Maintain metadata (shard map, table schema list, dropped-DB set)
-//   - Route DML requests to the correct shard slave
-//   - Broadcast DDL to all slaves
-//   - Sign every outbound request with an HMAC token
-//   - Health-check slaves and mark them offline on failure
-//   - Persist metadata to metadata.json after every DDL change
-//   - Replicate metadata to slaves after every DDL change
-//   - Expose /gateway/status and /gateway/sync for debugging and failover
-
 import (
 	"encoding/json"
 	"fmt"
@@ -46,9 +33,6 @@ func main() {
 	log.Printf("[gateway] slaves: %s  %s  %s", slaveAURL, slaveBURL, slaveCURL)
 
 	// ── 3. Load persisted metadata BEFORE starting HTTP ─────────────────
-	// This ensures a restarted gateway immediately resumes with the last
-	// known shard map, slave list, and dropped-DB set — even if it was
-	// offline while the promoted slave handled new DDL.
 	if err := metadata.LoadMetadata(); err != nil {
 		if os.IsNotExist(err) {
 			log.Println("[gateway] no metadata.json found — starting fresh")
@@ -62,7 +46,6 @@ func main() {
 	log.Println("[gateway] health checker started (interval=10s)")
 
 	// ── 5. Replicate current state to all slaves on startup ──────────────
-	// This catches any slave that missed a DDL while it was restarting.
 	metadata.ReplicateToSlaves()
 
 	// ── 6. Build mux and listen ──────────────────────────────────────────
@@ -74,7 +57,6 @@ func main() {
 	}
 }
 
-// buildMux creates and returns the ServeMux with all routes registered.
 func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -91,7 +73,7 @@ func buildMux() *http.ServeMux {
 	mux.HandleFunc("/query/delete", method("DELETE", handlers.Delete))
 	mux.HandleFunc("/query/search", method("GET", handlers.Search))
 
-	// Health — no auth required
+	// Health
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "role": "gateway"})
@@ -149,10 +131,7 @@ func buildMux() *http.ServeMux {
 			http.Error(w, "invalid metadata payload", http.StatusBadRequest)
 			return
 		}
-		// Persist the newly adopted state atomically.
 		metadata.SaveMetadata()
-		// Push the recovered state to all remaining slaves so every node
-		// converges to the same version.
 		metadata.ReplicateToSlaves()
 		log.Printf("[gateway] metadata synced from promoted slave — version=%d", metadata.CurrentVersion())
 		w.Header().Set("Content-Type", "application/json")
