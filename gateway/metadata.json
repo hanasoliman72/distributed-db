@@ -1,0 +1,31 @@
+{
+  "slaves": [
+    {
+      "id": "slave-a",
+      "url": "http://127.0.0.1:8081"
+    },
+    {
+      "id": "slave-b",
+      "url": "http://127.0.0.1:8082"
+    },
+    {
+      "id": "slave-c",
+      "url": "http://127.0.0.1:8083"
+    }
+  ],
+  "tables": [
+    {
+      "DB": "UNI",
+      "Table": "users",
+      "Attributes": [
+        "name"
+      ],
+      "ShardCount": 3,
+      "SlaveIDs": [
+        "slave-a",
+        "slave-b",
+        "slave-c"
+      ]
+    }
+  ]
+}

@@ -9,15 +9,18 @@ package main
 //   - Broadcast DDL to all slaves
 //   - Sign every outbound request with an HMAC token
 //   - Health-check slaves and mark them offline on failure
-//   - Expose /gateway/status for debugging
+//   - Persist metadata to metadata.json after every DDL change
+//   - Expose /gateway/status and /gateway/promote for debugging and failover
 
 import (
 	"encoding/json"
 	"gateway/auth"
 	"gateway/handlers"
 	"gateway/metadata"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -32,7 +35,7 @@ const (
 func main() {
 	// ── 1. Configure auth secret ────────────────────────────────────────
 	auth.SetSecret(gatewaySecret)
-	log.Println("[gateway] HMAC secret loaded from constant gatewaySecret")
+	log.Println("[gateway] HMAC secret loaded")
 
 	// ── 2. Register slaves ───────────────────────────────────────────────
 	metadata.RegisterSlave("slave-a", slaveAURL)
@@ -40,11 +43,22 @@ func main() {
 	metadata.RegisterSlave("slave-c", slaveCURL)
 	log.Printf("[gateway] slaves: %s  %s  %s", slaveAURL, slaveBURL, slaveCURL)
 
-	// ── 3. Start health checker ──────────────────────────────────────────
+	// ── 5. Start health checker ──────────────────────────────────────────
 	metadata.StartHealthChecker(10 * time.Second)
 	log.Println("[gateway] health checker started (interval=10s)")
 
-	// ── 4. Register routes ───────────────────────────────────────────────
+	// ── 6. Build mux and listen ──────────────────────────────────────────
+	mux := buildMux()
+	log.Printf("[gateway] listening on %s", defaultPort)
+	log.Printf("number of slaves: %d", len(metadata.Registry))
+	if err := http.ListenAndServe(defaultPort, mux); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// buildMux creates and returns the ServeMux with all routes registered.
+// Kept as a separate function so it is easy to unit-test handlers.
+func buildMux() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// DDL
@@ -60,12 +74,13 @@ func main() {
 	mux.HandleFunc("/query/delete", method("DELETE", handlers.Delete))
 	mux.HandleFunc("/query/search", method("GET", handlers.Search))
 
-	// Health / status
+	// Health — no auth required (slave-go's watcher and load balancers hit this)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "role": "gateway"})
 	})
 
+	// Status
 	mux.HandleFunc("/gateway/status", func(w http.ResponseWriter, r *http.Request) {
 		type slaveInfo struct {
 			ID    string `json:"id"`
@@ -80,11 +95,50 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{"slaves": slaves})
 	})
 
-	// ── 5. Start HTTP server ─────────────────────────────────────────────
-	log.Printf("[gateway] listening on %s", defaultPort)
-	if err := http.ListenAndServe(defaultPort, mux); err != nil {
-		log.Fatal(err)
-	}
+	// /gateway/promote — slave-go POSTs here to announce it has taken over.
+	// If the original gateway somehow recovers it will see this notice in its
+	// log and can be restarted as a standby.
+	mux.HandleFunc("/gateway/promote", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SlaveID string `json:"slave_id"`
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		log.Printf("[gateway] PROMOTE notice received from slave %s", body.SlaveID)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"message": "acknowledged"})
+	})
+
+	// /gateway/sync — promoted slave POSTs its metadata.json to restore master
+	mux.HandleFunc("/gateway/sync", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		data, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "failed to read body", http.StatusBadRequest)
+			return
+		}
+		if err := metadata.LoadMetadataFromBytes(data); err != nil {
+			log.Printf("[gateway] sync: invalid metadata payload: %v", err)
+			http.Error(w, "invalid metadata payload", http.StatusBadRequest)
+			return
+		}
+		if err := os.WriteFile(metadata.MetadataFile, data, 0644); err != nil {
+			log.Printf("[gateway] sync: write error: %v", err)
+			http.Error(w, "failed to write metadata", http.StatusInternalServerError)
+			return
+		}
+		log.Printf("[gateway] metadata synced from promoted slave and loaded")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"message": "metadata synced"})
+	})
+
+	return mux
 }
 
 func method(m string, h http.HandlerFunc) http.HandlerFunc {

@@ -5,18 +5,62 @@ package handlers
 // Handlers for data-manipulation operations.
 //
 // INSERT  → route to one shard (round-robin among alive slaves)
-// SELECT  → fan-out to ALL shards, merge results via MapReducer
+// SELECT  → fan-out to ALL shards, merge results via MapReducer service
 // UPDATE  → route to the shard that owns the id (or all if no id filter)
 // DELETE  → same routing logic as UPDATE
-// SEARCH  → fan-out to ALL shards, merge via MapReducer
+// SEARCH  → fan-out to ALL shards, merge via MapReducer service
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"gateway/metadata"
 	"gateway/shard"
+	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"time"
 )
+
+// mapReducerURL is the address of the MapReducer service.
+// It is intentionally a package-level var so tests can override it.
+var mapReducerURL = "http://127.0.0.1:8090"
+
+var mrClient = &http.Client{Timeout: 10 * time.Second}
+
+// callMapReducer sends shard results to the MapReducer and returns merged records.
+// Falls back to simple concatenation if the MapReducer is unreachable.
+func callMapReducer(shards [][]any, orderBy, order string, limit int) ([]any, error) {
+	payload := map[string]any{
+		"shards":   shards,
+		"order_by": orderBy,
+		"order":    order,
+		"limit":    limit,
+	}
+	body, _ := json.Marshal(payload)
+
+	resp, err := mrClient.Post(mapReducerURL+"/reduce", "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Printf("[dml] MapReducer unreachable (%v) — falling back to local merge", err)
+		// Fallback: simple flatten
+		merged := make([]any, 0)
+		for _, rows := range shards {
+			merged = append(merged, rows...)
+		}
+		return merged, nil
+	}
+	defer resp.Body.Close()
+
+	raw, _ := io.ReadAll(resp.Body)
+	var result struct {
+		Records []any `json:"records"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("mapReducer: bad response: %w", err)
+	}
+	return result.Records, nil
+}
 
 // ── /query/insert  POST ────────────────────────────────────────────────────
 
@@ -85,7 +129,7 @@ func Select(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Fan-out to all shards and merge.
+	// Fan-out to all shards, collect per-shard row lists, then merge via MapReducer.
 	alive := metadata.AliveSlaves()
 	if len(alive) == 0 {
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
@@ -93,8 +137,8 @@ func Select(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type shardResult struct {
-		records []any
-		err     error
+		rows []any
+		err  error
 	}
 	ch := make(chan shardResult, len(alive))
 	path := "/shard/query/select?" + q.Encode()
@@ -107,18 +151,30 @@ func Select(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			rows, _ := res.Body["records"].([]any)
-			ch <- shardResult{records: rows}
+			ch <- shardResult{rows: rows}
 		}(s)
 	}
 
-	merged := make([]any, 0)
+	shardBuckets := make([][]any, 0, len(alive))
 	for range alive {
 		sr := <-ch
 		if sr.err == nil {
-			merged = append(merged, sr.records...)
+			shardBuckets = append(shardBuckets, sr.rows)
 		}
 	}
 	close(ch)
+
+	// Optional query params forwarded to MapReducer.
+	orderBy := q.Get("order_by")
+	order := q.Get("order")
+	limit := 0
+	fmt.Sscanf(q.Get("limit"), "%d", &limit)
+
+	merged, err := callMapReducer(shardBuckets, orderBy, order, limit)
+	if err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 
 	respond(w, http.StatusOK, map[string]any{"count": len(merged), "records": merged})
 }
@@ -216,13 +272,20 @@ func Search(w http.ResponseWriter, r *http.Request) {
 		}(s)
 	}
 
-	merged := make([]any, 0)
+	shardBuckets := make([][]any, 0, len(alive))
 	for range alive {
 		if rows := <-ch; rows != nil {
-			merged = append(merged, rows...)
+			shardBuckets = append(shardBuckets, rows)
 		}
 	}
 	close(ch)
+
+	// No ordering needed for search, but pass through any caller preferences.
+	merged, err := callMapReducer(shardBuckets, "", "", 0)
+	if err != nil {
+		respond(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 
 	respond(w, http.StatusOK, map[string]any{"search_term": term, "count": len(merged), "records": merged})
 }

@@ -34,12 +34,17 @@ bool VerifyToken(string token)
 {
     try
     {
-        var parts = token.Split('|', 3);
-        if (parts.Length != 3) return false;
-        var (ts, nonce, gotSig) = (parts[0], parts[1], parts[2]);
-        
-        using var mac  = new HMACSHA256(secret);
-        var wantBytes  = mac.ComputeHash(Encoding.UTF8.GetBytes($"{ts}|{nonce}"));
+        var parts = token.Split('|', 2);
+if (parts.Length != 2) return false;
+
+var nonce  = parts[0];
+var gotSig = parts[1];
+
+using var mac = new HMACSHA256(secret);
+
+var wantBytes = mac.ComputeHash(
+    Encoding.UTF8.GetBytes(nonce)
+);
         var wantSig    = Convert.ToHexString(wantBytes).ToLower();
         return CryptographicOperations.FixedTimeEquals(
             Encoding.UTF8.GetBytes(wantSig), Encoding.UTF8.GetBytes(gotSig));

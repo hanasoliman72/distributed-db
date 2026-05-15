@@ -27,14 +27,22 @@ SHARED_SECRET = os.getenv("SLAVE_SHARED_SECRET", "Hana-1234").encode()
 
 def verify_token(token: str) -> bool:
     try:
-        parts = token.split("|", 2)
-        if len(parts) != 3:
+        parts = token.split("|", 1)
+        #print("PARTS:", parts)
+
+        if len(parts) != 2:
             return False
-        ts, nonce, got_sig = parts
-       
-        msg = f"{ts}|{nonce}".encode()
-        want_sig = hmac.new(SHARED_SECRET, msg, hashlib.sha256).hexdigest()
+
+        nonce, got_sig = parts
+
+        want_sig = hmac.new(
+            SHARED_SECRET,
+            nonce.encode(),
+            hashlib.sha256
+        ).hexdigest()
+
         return hmac.compare_digest(got_sig, want_sig)
+
     except Exception:
         return False
 
@@ -43,6 +51,7 @@ def require_token(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         token = request.headers.get("X-Gateway-Token", "")
+        #print("TOKEN:", token)
         if not token or not verify_token(token):
             return jsonify({"error": "forbidden: invalid or missing gateway token"}), 403
         return f(*args, **kwargs)

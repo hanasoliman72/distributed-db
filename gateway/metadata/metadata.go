@@ -1,32 +1,19 @@
 package metadata
 
-// metadata.go
-//
-// The API Gateway holds NO row data.  Instead it maintains:
-//   1. SlaveRegistry – the list of slave nodes and their liveness.
-//   2. ShardMap      – for each (db, table) the hash-range → slave assignment.
-//
-// Sharding strategy: horizontal hash partitioning by primary key modulo N.
-//   shard_index = hash(id) % len(alive_slaves)
-//
-// For INSERT (no id yet) the gateway uses round-robin across alive slaves and
-// stores the assignment so future updates / deletes can route correctly.
-//
-// Metadata is kept in memory only (no persistence for the prototype).  Add a
-// BoltDB / SQLite backend if you need durability across gateway restarts.
-
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 )
 
-// ── Slave registry ─────────────────────────────────────────────────────────
+const MetadataFile = "metadata.json"
 
-// Slave represents one data node.
+// ── Slave registry ─────────────────────────────────────────────────────────
 type Slave struct {
 	ID  string // e.g. "slave-a"
 	URL string // e.g. "http://127.0.0.1:8081"
@@ -40,15 +27,13 @@ func newSlave(id, url string) *Slave { return &Slave{ID: id, URL: url, alive: tr
 func (s *Slave) IsAlive() bool   { s.mu.RLock(); defer s.mu.RUnlock(); return s.alive }
 func (s *Slave) SetAlive(v bool) { s.mu.Lock(); defer s.mu.Unlock(); s.alive = v }
 
-// Registry holds all known slaves.
 var Registry []*Slave
 
-// RegisterSlave adds a slave to the global registry.
 func RegisterSlave(id, url string) {
 	Registry = append(Registry, newSlave(id, url))
 }
 
-// AliveSalves returns currently healthy slaves in order.
+// AliveSlaves returns currently healthy slaves in order.
 func AliveSlaves() []*Slave {
 	out := make([]*Slave, 0, len(Registry))
 	for _, s := range Registry {
@@ -66,18 +51,13 @@ type TableMeta struct {
 	DB         string
 	Table      string
 	Attributes []string
-
-	// ShardCount is the number of shards when the table was created.
-	// Changing this requires a re-shard (not implemented in prototype).
 	ShardCount int
-
-	// SlaveIDs[i] is the slave that owns shard i (0-based).
-	SlaveIDs []string
+	SlaveIDs   []string
 }
 
 var (
 	tableMu sync.RWMutex
-	tables  = map[string]*TableMeta{} // key: "db.table"
+	tables  = map[string]*TableMeta{}
 )
 
 func tableKey(db, table string) string { return db + "." + table }
@@ -129,10 +109,83 @@ func TablesInDB(db string) []*TableMeta {
 	return out
 }
 
+// ── Persistence ────────────────────────────────────────────────────────────
+
+// persistedMetadata is the JSON structure written to MetadataFile.
+type persistedMetadata struct {
+	Slaves []persistedSlave `json:"slaves"`
+	Tables []*TableMeta     `json:"tables"`
+}
+
+type persistedSlave struct {
+	ID  string `json:"id"`
+	URL string `json:"url"`
+}
+
+// SaveMetadata writes the current registry and shard map to MetadataFile.
+// Called after every DDL change so slave-go always has an up-to-date snapshot.
+func SaveMetadata() {
+	slaves := make([]persistedSlave, len(Registry))
+	for i, s := range Registry {
+		slaves[i] = persistedSlave{ID: s.ID, URL: s.URL}
+	}
+
+	tableMu.RLock()
+	tlist := make([]*TableMeta, 0, len(tables))
+	for _, m := range tables {
+		tlist = append(tlist, m)
+	}
+	tableMu.RUnlock()
+
+	data, err := json.MarshalIndent(persistedMetadata{Slaves: slaves, Tables: tlist}, "", "  ")
+	if err != nil {
+		log.Printf("[metadata] SaveMetadata: marshal error: %v", err)
+		return
+	}
+	if err := os.WriteFile(MetadataFile, data, 0644); err != nil {
+		log.Printf("[metadata] SaveMetadata: write error: %v", err)
+		return
+	}
+	log.Printf("[metadata] saved to %s (%d tables, %d slaves)", MetadataFile, len(tlist), len(slaves))
+}
+
+// LoadMetadata reads MetadataFile and restores the registry and shard map.
+// Called at startup (both by the normal gateway and by slave-go when it
+func LoadMetadata() error {
+	data, err := os.ReadFile(MetadataFile)
+	if err != nil {
+		return fmt.Errorf("LoadMetadata: read: %w", err)
+	}
+	return LoadMetadataFromBytes(data)
+}
+
+// LoadMetadataFromBytes validates and loads persisted metadata directly from JSON.
+func LoadMetadataFromBytes(data []byte) error {
+	var pm persistedMetadata
+	if err := json.Unmarshal(data, &pm); err != nil {
+		return fmt.Errorf("LoadMetadataFromBytes: unmarshal: %w", err)
+	}
+
+	// Fully replace the in-memory registry and shard map to match persisted state.
+	Registry = nil
+	tableMu.Lock()
+	tables = make(map[string]*TableMeta)
+	for _, m := range pm.Tables {
+		tables[tableKey(m.DB, m.Table)] = m
+	}
+	tableMu.Unlock()
+
+	for _, s := range pm.Slaves {
+		RegisterSlave(s.ID, s.URL)
+	}
+
+	log.Printf("[metadata] loaded from %s (%d tables, %d slaves)", MetadataFile, len(pm.Tables), len(pm.Slaves))
+	return nil
+}
+
 // ── Routing helpers ────────────────────────────────────────────────────────
 
 // SlaveForID returns the slave that owns the given row id within a table.
-// Uses consistent hash: shard = fnv32(id) % ShardCount.
 func (m *TableMeta) SlaveForID(id string) *Slave {
 	h := fnv.New32a()
 	h.Write([]byte(id))
@@ -155,7 +208,6 @@ func (m *TableMeta) NextInsertSlave() (*Slave, int, error) {
 	rrMu.Lock()
 	defer rrMu.Unlock()
 
-	// try each shard slot in round-robin order
 	for attempt := 0; attempt < m.ShardCount; attempt++ {
 		idx := (rrCounter + attempt) % m.ShardCount
 		slaveID := m.SlaveIDs[idx]

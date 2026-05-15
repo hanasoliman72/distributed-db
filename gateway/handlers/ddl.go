@@ -1,11 +1,5 @@
 package handlers
 
-// ddl.go
-//
-// Handlers for database and table DDL operations.
-// The gateway holds only metadata; actual schema changes are broadcast to ALL
-// slave nodes via the shard package.
-
 import (
 	"gateway/metadata"
 	"gateway/shard"
@@ -13,7 +7,6 @@ import (
 )
 
 // ── /db/create  POST ───────────────────────────────────────────────────────
-
 func CreateDB(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB string `json:"db"`
@@ -36,11 +29,12 @@ func CreateDB(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	metadata.SaveMetadata()
 	respond(w, http.StatusCreated, map[string]string{"message": "database '" + req.DB + "' created on all shards"})
 }
 
 // ── /db/drop  DELETE ───────────────────────────────────────────────────────
-
 func DropDB(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB string `json:"db"`
@@ -50,7 +44,6 @@ func DropDB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove all table metadata for this DB.
 	for _, m := range metadata.TablesInDB(req.DB) {
 		metadata.DropTableMeta(m.DB, m.Table)
 	}
@@ -60,11 +53,12 @@ func DropDB(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
 		return
 	}
+
+	metadata.SaveMetadata()
 	respond(w, http.StatusOK, map[string]string{"message": "database '" + req.DB + "' dropped from all shards"})
 }
 
 // ── /table/create  POST ────────────────────────────────────────────────────
-
 func CreateTable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB         string   `json:"db"`
@@ -76,17 +70,12 @@ func CreateTable(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register the table in metadata BEFORE broadcasting, so that subsequent
-	// inserts can be routed immediately.
 	meta := metadata.CreateTableMeta(req.DB, req.Table, req.Attributes)
 	if meta.ShardCount == 0 {
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available to host the table"})
 		return
 	}
 
-	// Broadcast CREATE TABLE to every slave so each one has the schema.
-	// (Rows will only land on the assigned shard, but all nodes need the schema
-	// for cross-shard SELECTs to know the column layout.)
 	results := shard.BroadcastAll("POST", "/shard/table/create", map[string]any{
 		"db":         req.DB,
 		"table":      req.Table,
@@ -101,6 +90,7 @@ func CreateTable(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	metadata.SaveMetadata()
 	respond(w, http.StatusCreated, map[string]any{
 		"message":     "table '" + req.Table + "' created",
 		"shard_count": meta.ShardCount,
@@ -109,7 +99,6 @@ func CreateTable(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── /table/drop  DELETE ────────────────────────────────────────────────────
-
 func DropTable(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		DB    string `json:"db"`
@@ -130,5 +119,8 @@ func DropTable(w http.ResponseWriter, r *http.Request) {
 		respond(w, http.StatusServiceUnavailable, map[string]string{"error": "no slaves available"})
 		return
 	}
+
+	metadata.SaveMetadata()
+
 	respond(w, http.StatusOK, map[string]string{"message": "table '" + req.Table + "' dropped"})
 }
